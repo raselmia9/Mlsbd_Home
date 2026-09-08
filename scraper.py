@@ -1,7 +1,6 @@
 import os
 import json
 import time
-import re
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import cloudscraper
@@ -9,12 +8,12 @@ from bs4 import BeautifulSoup
 
 BASE_URL = "https://mlsbd.co/"
 
-# পেজ রেঞ্জ কনফিগারেশন (আপনার ইচ্ছেমতো ভাগ করে দিতে পারেন)
-START_PAGE = 1      # যেমন: প্রথম ধাপের জন্য ১
-END_PAGE = 200      # যেমন: প্রথম ধাপের শেষ পেজ ২০০ (পরের ধাপে ২০ কাজেই ২০১ থেকে ৫০০ দিতে পারেন)
+# পেজ রেঞ্জ (আপনার প্রয়োজনমতো বাড়িয়ে নিতে পারেন)
+START_PAGE = 1      
+END_PAGE = 250      
 
-BATCH_SIZE = 100      
-MAX_WORKERS = 25      # গতি বাড়ানোর জন্য ওয়ার্কার সংখ্যা বাড়িয়ে ২৫ করা হলো
+BATCH_SIZE = 300      
+MAX_WORKERS = 60      # স্পিড বহুগুণ বাড়িয়ে দেওয়ার জন্য ওয়ার্কার ৬০ করা হলো
 
 # ১৮+ বা অ্যাডাল্ট কন্টেন্ট চেনার জন্য কিওয়ার্ড লিস্ট
 ADULT_KEYWORDS = ['18+', '18-plus', '18 plus', '-18-', 'adult', 'erotic', 'ullu', 'kooku', 'primeshots', 'xprime', 'hot web series']
@@ -62,13 +61,14 @@ def scrape_detail_page_fast(scraper, detail_url):
     }
     
     try:
-        response = scraper.get(detail_url, timeout=8)
+        # টাইমআউট কমিয়ে ৪ সেকেন্ড করা হয়েছে যাতে দ্রুত স্কিপ করে ফেইলড বা স্লো পেজগুলো
+        response = scraper.get(detail_url, timeout=4)
         if response.status_code != 200:
             return item_data
             
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # ডিটেইল পেজ থেকে রিয়েল পাবলিশিং ডেট এবং টাইম সংগ্রহ করা
+        # রিয়েল পাবলিশিং ডেট এবং টাইম সংগ্রহ
         meta_tag = soup.find('meta', property='article:published_time')
         if meta_tag and meta_tag.get('content'):
             item_data["date_time"] = meta_tag['content']
@@ -82,7 +82,7 @@ def scrape_detail_page_fast(scraper, detail_url):
                         item_data["date_time"] = t['datetime']
                         break
 
-        # সিরিজ বা এপিসোড চেক করা (প্যারালাল ডিটেইল প্রসেসিং)
+        # সিরিজ বা মুভি লিংক প্রসেসিং
         text_nodes = soup.find_all(string=lambda t: t and ('epi' in t.lower() or 'episode' in t.lower()))
         
         seen_episodes = set()
@@ -221,7 +221,7 @@ def extract_items_from_soup(soup, seen_urls, global_index_counter):
         else:
             title = clean_title_from_url(detail_url)
 
-        # প্রথম ধাপেই ১৮+ কন্টেন্ট স্কিপ করা
+        # প্রথম ধাপে ১৮+ কন্টেন্ট ফিল্টার করে বাদ দেওয়া
         if is_18_plus(title, detail_url):
             continue
 
@@ -237,7 +237,7 @@ def extract_items_from_soup(soup, seen_urls, global_index_counter):
     return items
 
 def scrape_mlsbd():
-    print(f"Scraping started for pages {START_PAGE} to {END_PAGE} at: {datetime.now()}")
+    print(f"Super-fast scraping started for pages {START_PAGE} to {END_PAGE} at: {datetime.now()}")
     
     scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'linux', 'desktop': True})
     
@@ -252,35 +252,28 @@ def scrape_mlsbd():
             else:
                 page_url = f"{BASE_URL}page/{page_num}/"
 
-            print(f"Fetching page {page_num}: {page_url}")
             try:
-                response = scraper.get(page_url, timeout=12)
+                response = scraper.get(page_url, timeout=8)
                 if response.status_code != 200:
-                    print(f"Page {page_num} returned status {response.status_code}. Ending range.")
                     break
                 
                 soup = BeautifulSoup(response.text, 'html.parser')
                 new_items = extract_items_from_soup(soup, seen_urls, global_index_counter)
                 
                 if not new_items:
-                    print(f"No more items found on page {page_num}.")
                     break
                 else:
                     all_items_meta.extend(new_items)
-                    print(f"Total collected items metadata so far: {len(all_items_meta)}")
             except Exception as e:
-                print(f"Error on page {page_num}: {str(e)}")
                 continue
 
         total_items = len(all_items_meta)
-        print(f"\nTotal items to process in this range: {total_items}. Running parallel multi-threaded execution...")
+        print(f"\nTotal items to process: {total_items}. Running high-speed parallel execution (Workers: {MAX_WORKERS})...")
 
         processed_results = []
         
         for i in range(0, total_items, BATCH_SIZE):
             batch = all_items_meta[i:i + BATCH_SIZE]
-            batch_num = (i // BATCH_SIZE) + 1
-            print(f"Processing Batch {batch_num}...")
             
             with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
                 futures = {executor.submit(process_single_item, item): item for item in batch}
@@ -290,16 +283,14 @@ def scrape_mlsbd():
                     if res:
                         processed_results.append(res)
 
-        # সিরিয়াল ঠিক রাখা
         processed_results.sort(key=lambda x: x[0])
         movies_data = [item[1] for item in processed_results]
 
-        # ফাইলের নাম রেঞ্জ অনুযায়ী সেভ করা যেতে পারে, যেমন multilink_1_200.json
         output_filename = f"multilink_{START_PAGE}_{END_PAGE}.json"
         with open(output_filename, 'w', encoding='utf-8') as f:
             json.dump(movies_data, f, ensure_ascii=False, indent=4)
 
-        print(f"\nSuccessfully completed! Saved {len(movies_data)} items to {output_filename}")
+        print(f"\nSuccessfully completed! Saved {len(movies_data)} items to {output_filename} at {datetime.now()}")
 
         status_message = f"SUCCESS: Scraped {len(movies_data)} items (Pages {START_PAGE}-{END_PAGE}) at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         with open('status.txt', 'w', encoding='utf-8') as f:
