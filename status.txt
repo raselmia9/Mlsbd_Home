@@ -1,1 +1,1 @@
-SUCCESS: Scraped 37 items in batches successfully at 2026-09-08 05:25:23
+SUCCESS: Scraped 37 items (without 4K) successfully at 2026-09-08 05:31:14
