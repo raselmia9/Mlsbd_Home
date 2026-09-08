@@ -1,1 +1,1 @@
-SUCCESS: Scraped 255 items at 2026-09-08 14:40:52
+SUCCESS: Scraped 994 items at 2026-09-08 14:54:04
