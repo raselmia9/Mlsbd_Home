@@ -10,6 +10,20 @@ BASE_URL = "https://mlsbd.co/"
 BATCH_SIZE = 100      
 MAX_WORKERS = 20      
 
+# যে শিরোনাম বা কিওয়ার্ডগুলো আপনি লিস্টে রাখতে চান না, সেগুলো এখানে যুক্ত করতে পারেন
+EXCLUDED_KEYWORDS = [
+    'salahuddin ayyubi', 
+    'সালাউদ্দিন আইয়ুবী', 
+    'sultan salahuddin'
+]
+
+def should_exclude_title(title):
+    title_lower = title.lower()
+    for keyword in EXCLUDED_KEYWORDS:
+        if keyword in title_lower:
+            return True
+    return False
+
 def clean_title_from_url(url):
     try:
         path = url.strip('/').split('/')[-1]
@@ -38,10 +52,6 @@ def is_valid_post_url(url):
     return True
 
 def scrape_detail_page_fast(scraper, detail_url):
-    """
-    ডিটেইল পেজ থেকে প্রতিটি কোয়ালিটির সঠিক লিংক সংগ্রহ করবে। 
-    যদি ৭২০পি বা অন্যান্য রেজুলেশন থাকে, তবে 'watch online' বাদ দেওয়া হবে।
-    """
     item_data = {
         "detail_url": detail_url,
         "type": "movie",
@@ -78,10 +88,9 @@ def scrape_detail_page_fast(scraper, detail_url):
                             link_text = a_tag.get_text(strip=True).lower()
                             link_href = a_tag['href']
                             
-                            # ক্যাটাগরি বা ভুল লিংক ফিল্টার করা, শুধুমাত্র savelinks বা ডাউনলোডেবল লিংক রাখা
                             if '4k' in link_text or '4k' in link_href:
                                 continue
-                            if '/category/' in link_href: # ক্যাটাগরি পেজ বাদ দেওয়ার জন্য
+                            if '/category/' in link_href:
                                 continue
                                 
                             for q in ['360p', '480p', '720p', '1080p', 'watch online']:
@@ -89,7 +98,6 @@ def scrape_detail_page_fast(scraper, detail_url):
                                     qualities_map[q] = link_href
                                     break
 
-                    # যদি ৭২০পি বা অন্য রেজুলেশন থাকে, তবে 'watch online' বাদ দেওয়া
                     has_resolution = any(q in qualities_map for q in ['360p', '480p', '720p', '1080p'])
                     if has_resolution and 'watch online' in qualities_map:
                         del qualities_map['watch online']
@@ -120,7 +128,6 @@ def scrape_detail_page_fast(scraper, detail_url):
                         qualities_map[q] = href
                         break
             
-            # যদি নির্দিষ্ট রেজুলেশন থাকে, তবে 'watch online' বাদ দেওয়া
             has_resolution = any(q in qualities_map for q in ['360p', '480p', '720p', '1080p'])
             if has_resolution and 'watch online' in qualities_map:
                 del qualities_map['watch online']
@@ -165,7 +172,6 @@ def process_single_item(item):
 
 def extract_items_from_soup(soup, seen_urls):
     items = []
-    # হোমপেজের প্রথম দিকের আইটেম যাতে বাদ না পড়ে, সেজন্য সব ধরনের পোস্ট কার্ড সিলেক্টর ভালোভাবে হ্যান্ডেল করা হলো
     cards = soup.find_all(['article', 'div'], class_=lambda x: x and any(c in x.lower() for c in ['item', 'post', 'card', 'box']))
     
     for card in cards:
@@ -180,8 +186,6 @@ def extract_items_from_soup(soup, seen_urls):
         if not is_valid_post_url(detail_url) or detail_url in seen_urls:
             continue
             
-        seen_urls.add(detail_url)
-        
         img_tag = card.find('img')
         img_url = ""
         if img_tag:
@@ -198,6 +202,11 @@ def extract_items_from_soup(soup, seen_urls):
         else:
             title = clean_title_from_url(detail_url)
 
+        # যদি টাইটেলে এক্সক্লুড করা শব্দ থাকে, তবে এটি স্কিপ করবে
+        if should_exclude_title(title):
+            continue
+
+        seen_urls.add(detail_url)
         items.append({
             "title": title,
             "logo_url": img_url if img_url else "",
@@ -221,7 +230,7 @@ def scrape_mlsbd():
         all_items_meta = extract_items_from_soup(soup, seen_urls)
         print(f"Initial items found on homepage: {len(all_items_meta)}")
 
-        # ১৫০০-১৬০০ আইটেম পাওয়ার জন্য পেজের সীমা নির্ধারণ (প্রায় ৭০-৮০ পেজ)
+        # ১৫০০-১৬০০ আইটেম পাওয়ার জন্য পেজের সীমা বাড়িয়ে ৮০ পর্যন্ত রাখা হলো
         max_pages = 80
         for page_num in range(2, max_pages + 2):
             page_url = f"{BASE_URL}page/{page_num}/"
