@@ -7,6 +7,17 @@ from bs4 import BeautifulSoup
 # MLSBD URL
 BASE_URL = "https://mlsbd.co/"
 
+def clean_title_from_url(url):
+    """ইউরেনিয়ামের লিংক বা স্লাগ থেকে একটি সুন্দর টাইটেল তৈরি করার ফাংশন"""
+    try:
+        # যেমন: https://mlsbd.co/malik-2026-bengali-utshob/ -> malik-2026-bengali-utshob
+        path = url.strip('/').split('/')[-1]
+        # হাইফেন সরিয়ে স্পেস দিয়ে ক্যাপিটালাইজ করা
+        title = path.replace('-', ' ').title()
+        return title
+    except:
+        return "Unknown Movie"
+
 def scrape_mlsbd():
     print(f"Scraping started at: {datetime.now()}")
     
@@ -63,22 +74,28 @@ def scrape_mlsbd():
                     if detail_url.rstrip('/') == BASE_URL.rstrip('/'):
                         continue
 
-                    # সঠিক টাইটেল পাওয়ার জন্য হেডিং ট্যাগ বা অ্যাংকর ট্যাগের ভেতরের টেক্সট খোঁজা
+                    # বিভিন্ন জায়গা থেকে সঠিক টাইটেল খোঁজার চেষ্টা
                     title_tag = card.find(['h2', 'h3', 'h1'])
-                    if title_tag:
+                    if title_tag and title_tag.get_text(strip=True):
                         title = title_tag.get_text(strip=True)
+                    elif link_tag.get_text(strip=True) and len(link_tag.get_text(strip=True)) > 3:
+                        title = link_tag.get_text(strip=True)
+                    elif img_tag and img_tag.get('alt') and img_tag.get('alt').strip() != "Featured Image":
+                        title = img_tag.get('alt').strip()
                     else:
-                        # যদি হেডিং না থাকে, তবে ইমেজের alt টেক্সট বা a ট্যাগের টেক্সট ট্রাই করব
-                        if img_tag and img_tag.get('alt'):
-                            title = img_tag.get('alt').strip()
-                        else:
-                            title = link_tag.get_text(strip=True)
+                        # যদি কোথাও আসল নাম না পাওয়া যায়, তবে ইউআরএল/স্লাগ থেকে সুন্দর নাম জেনারেট করব
+                        title = clean_title_from_url(detail_url)
 
                 # ইউনিক এবং ভ্যালিড লিংক চেক করা
                 if detail_url and detail_url.rstrip('/') != BASE_URL.rstrip('/') and detail_url not in seen_urls:
                     seen_urls.add(detail_url)
+                    
+                    # যদি কোনো কারণে টাইটেল খালি বা 'Featured Image' থেকে যায়, তবে ইউআরএল থেকে জেনারেট করে নেব
+                    if not title or title.lower() == "featured image":
+                        title = clean_title_from_url(detail_url)
+
                     movies_data.append({
-                        "title": title if title and title != "No Title" else "Unknown Movie",
+                        "title": title,
                         "logo_url": img_url if img_url else "",
                         "detail_url": detail_url
                     })
@@ -91,19 +108,24 @@ def scrape_mlsbd():
             for a in soup.find_all('a', href=True):
                 detail_url = a['href']
                 
-                # হোমপেজ বাদ দেওয়া
                 if detail_url.rstrip('/') == BASE_URL.rstrip('/'):
                     continue
                     
                 img = a.find('img')
                 if img:
                     img_url = img.get('data-src') or img.get('src')
-                    title = img.get('alt') or a.get_text(strip=True)
+                    title = ""
+                    if img.get('alt') and img.get('alt').strip() != "Featured Image":
+                        title = img.get('alt').strip()
+                    elif a.get_text(strip=True) and len(a.get_text(strip=True)) > 3:
+                        title = a.get_text(strip=True)
+                    else:
+                        title = clean_title_from_url(detail_url)
                     
                     if detail_url and detail_url not in seen_urls and ('mlsbd.co' in detail_url or detail_url.startswith('/')):
                         seen_urls.add(detail_url)
                         movies_data.append({
-                            "title": title if title else "Unknown Movie",
+                            "title": title,
                             "logo_url": img_url if img_url else "",
                             "detail_url": detail_url
                         })
