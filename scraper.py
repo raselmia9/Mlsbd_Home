@@ -1,5 +1,6 @@
 import os
 import json
+from urllib.parse import urljoin
 import cloudscraper
 from bs4 import BeautifulSoup
 
@@ -15,7 +16,7 @@ def clean_title_from_url(url):
         return "Unknown Movie"
 
 def scrape_mlsbd():
-    print("🟢 [INFO] Scraping process initiated...")
+    print("🟢 [INFO] Scraping process initiated properly...")
     
     scraper = cloudscraper.create_scraper(
         browser={
@@ -30,7 +31,6 @@ def scrape_mlsbd():
     success_pages = 0
     
     try:
-        # পেজ বাই পেজ লুপ (১ থেকে ২০ পেজ)
         for page_num in range(1, MAX_PAGES + 1):
             if page_num == 1:
                 page_url = BASE_URL
@@ -60,8 +60,10 @@ def scrape_mlsbd():
                         if not link_tag:
                             continue
                             
-                        detail_url = link_tag['href']
-                        if detail_url.rstrip('/') == BASE_URL.rstrip('/') or not detail_url.startswith('http'):
+                        # রিলেটিভ লিংকগুলোকে পারফেক্ট অ্যাবসোলিউট লিংকে রূপান্তর করা
+                        detail_url = urljoin(BASE_URL, link_tag['href'])
+                        
+                        if detail_url.rstrip('/') == BASE_URL.rstrip('/'):
                             continue
                             
                         if any(x in detail_url for x in ['/author/', '/category/', '/tag/', '/page/', 'contact', 'about']):
@@ -74,6 +76,8 @@ def scrape_mlsbd():
                             img_url = ""
                             if img_tag:
                                 img_url = img_tag.get('data-src') or img_tag.get('src') or img_tag.get('data-lazy-src') or ""
+                                if img_url and not img_url.startswith('http'):
+                                    img_url = urljoin(BASE_URL, img_url)
                                 
                             title_tag = card.find(['h2', 'h3', 'h1'])
                             if title_tag and title_tag.get_text(strip=True):
@@ -89,25 +93,6 @@ def scrape_mlsbd():
                                 "detail_url": detail_url
                             })
                             page_items_count += 1
-                else:
-                    # যদি কার্ড না পাওয়া যায়, তবে ডিরেক্ট এংকর ট্যাগ স্ক্যান করবে
-                    for a in soup.find_all('a', href=True):
-                        href = a['href']
-                        if 'mlsbd.co' in href and href.rstrip('/') != BASE_URL.rstrip('/'):
-                            if any(x in href for x in ['/author/', '/category/', '/tag/', '/page/', 'contact', 'about']):
-                                continue
-                            if href not in seen_urls:
-                                seen_urls.add(href)
-                                img = a.find('img')
-                                img_url = img.get('data-src') or img.get('src') if img else ""
-                                title = img.get('alt').strip() if (img and img.get('alt') and img.get('alt') != "Featured Image") else clean_title_from_url(href)
-                                
-                                movies_data.append({
-                                    "title": title,
-                                    "logo_url": img_url,
-                                    "detail_url": href
-                                })
-                                page_items_count += 1
 
                 print(f"🟢 [SUCCESS] Page {page_num} processed. Items found: {page_items_count} | Total so far: {len(movies_data)}")
                 success_pages += 1
@@ -120,7 +105,6 @@ def scrape_mlsbd():
         with open('multilink.json', 'w', encoding='utf-8') as f:
             json.dump(movies_data, f, ensure_ascii=False, indent=4)
         
-        # উন্নত এবং আকর্ষণীয় স্ট্যাটাস মেসেজ (কোনো টাইম/ডেট ছাড়াই)
         status_message = f"🟢 SUCCESS: Successfully scraped {len(movies_data)} items from {success_pages} pages."
         with open('status.txt', 'w', encoding='utf-8') as f:
             f.write(status_message)
