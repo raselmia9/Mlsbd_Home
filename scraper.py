@@ -28,7 +28,7 @@ def clean_episode_name(text):
     return cleaned if cleaned else text
 
 def scrape_detail_page(scraper, detail_url):
-    """প্রতিটি ডিটেইল পেজে প্রবেশ করে এপিসোড বা কোয়ালিটি লিংক সংগ্রহ করবে"""
+    """প্রতিটি ডিটেইল পেজে প্রবেশ করে এপিসোড বা কোয়ালিটি লিংক সংগ্রহ করবে (4K বাদে)"""
     item_data = {
         "detail_url": detail_url,
         "type": "movie",
@@ -64,13 +64,15 @@ def scrape_detail_page(scraper, detail_url):
                             link_text = a_tag.get_text(strip=True).lower()
                             link_href = a_tag['href']
                             
-                            for q in ['360p', '480p', '720p', '1080p', '4k', 'watch online']:
+                            # '4k' কে সম্পূর্ণ বাদ দেওয়া হয়েছে এবং বাকিগুলো ফিল্টার করা হচ্ছে
+                            for q in ['360p', '480p', '720p', '1080p', 'watch online']:
                                 if q in link_text:
                                     ep_links[q] = link_href
                                     break
                             else:
                                 if 'watch' in link_text or 'online' in link_text:
-                                    ep_links['watch_online'] = link_href
+                                    if '4k' not in link_text:
+                                        ep_links['watch_online'] = link_href
 
                     if ep_links:
                         item_data["episodes"].append({
@@ -86,7 +88,11 @@ def scrape_detail_page(scraper, detail_url):
                 text = a_tag.get_text(strip=True).lower()
                 href = a_tag['href']
                 
-                for q in ['360p', '480p', '720p', '1080p', '4k', 'watch online']:
+                # মুভির ক্ষেত্রেও '4k' ফিল্টার করে বাদ দেওয়া হবে
+                if '4k' in text or '4k' in href:
+                    continue
+                
+                for q in ['360p', '480p', '720p', '1080p', 'watch online']:
                     if q in text:
                         qualities_dict[q] = href
                         break
@@ -163,11 +169,10 @@ def scrape_mlsbd():
             })
 
         total_items = len(all_items_meta)
-        print(f"Total valid items found: {total_items}. Processing in batches of {BATCH_SIZE}...")
+        print(f"Total valid items found: {total_items}. Processing in batches of {BATCH_SIZE} (Skipping 4K)...")
 
         movies_data = []
         
-        # ব্যাচ বাই ব্যাচ লুপ চালিয়ে ডেটা কালেক্ট করা (যতক্ষণ না সব শেষ হয়)
         for i in range(0, total_items, BATCH_SIZE):
             batch = all_items_meta[i:i + BATCH_SIZE]
             batch_num = (i // BATCH_SIZE) + 1
@@ -191,19 +196,18 @@ def scrape_mlsbd():
                         item_entry["qualities"] = detail_info["qualities"]
 
                     movies_data.append(item_entry)
-                    time.sleep(0.5) # সার্ভারের সুরক্ষার জন্য ছোট বিরতি
+                    time.sleep(0.5)
                 except Exception as e:
                     print(f"Error on item {index}: {e}")
                     continue
             
-            # প্রতি ব্যাচ শেষে অটো সেভ করা, যাতে ডেটা লস না হয়
             with open('multilink.json', 'w', encoding='utf-8') as f:
                 json.dump(movies_data, f, ensure_ascii=False, indent=4)
             print(f"Batch {batch_num} saved successfully.")
 
         print(f"\nSuccessfully completed! All {len(movies_data)} items saved to multilink.json")
 
-        status_message = f"SUCCESS: Scraped {len(movies_data)} items in batches successfully at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        status_message = f"SUCCESS: Scraped {len(movies_data)} items (without 4K) successfully at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         with open('status.txt', 'w', encoding='utf-8') as f:
             f.write(status_message)
 
