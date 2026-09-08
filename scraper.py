@@ -158,7 +158,6 @@ def process_single_item(item):
 
 def extract_items_from_soup(soup, seen_urls):
     items = []
-    # ওয়েবসাইটের মূল পোস্ট কার্ডগুলো নিখুঁতভাবে ফেচ করার জন্য সিলেক্টর
     cards = soup.find_all(['article', 'div'], class_=lambda x: x and any(c in x.lower() for c in ['item', 'post', 'card', 'box', 'content']))
     
     for card in cards:
@@ -206,39 +205,45 @@ def scrape_mlsbd():
         seen_urls = set()
         all_items_meta = []
 
-        # মাল্টি-পেজ বা পেজিনেশন লুপ যা মোর বাটন বা পেজ সংখ্যা অনুযায়ী একেবারে শেষ পর্যন্ত ডেটা টেনে আনবে
-        # এখানে ১০০ পেজ পর্যন্ত ট্রাই করা হবে যাতে সব মুভি ও সিরিজ চলে আসে
-        max_pages = 100
+        # ওয়ার্ডপ্রেসের বিভিন্ন ফরম্যাটের পেজিনেশন এবং এজেক্স লোডিং হ্যান্ডেল করার জন্য ফ্লেক্সিবল লুপ
+        # হোমপেজ থেকে শুরু করে পর্যায়ক্রমে পেজ বাড়াতে থাকা
+        max_pages = 150
         for page_num in range(1, max_pages + 1):
+            # সাইটের স্ট্রাকচার অনুযায়ী পেজ ইউআরএল প্যাটার্ন
             if page_num == 1:
                 page_url = BASE_URL
             else:
-                # ওয়ার্ডপ্রেস সাইটের স্ট্যান্ডার্ড পেজিনেশন স্ট্রাকচার
+                # কখনো /page/2/ অথবা কখনো অন্য প্যারামিটার হতে পারে, ওয়ার্ডপ্রেসের স্ট্যান্ডার্ড রাখা হলো
                 page_url = f"{BASE_URL}page/{page_num}/"
 
             print(f"Fetching page {page_num}: {page_url}")
             try:
                 response = scraper.get(page_url, timeout=12)
                 if response.status_code != 200:
-                    print(f"Page {page_num} returned status {response.status_code}. Stopping pagination.")
-                    break
+                    # যদি পেজ না পায়, তবে ওয়ার্ডপ্রেসের পোস্ট অফসেট বা এজোক্স স্টাইলে ট্রাই করার জন্য লুপ চালিয়ে যাওয়া বা بریک করা
+                    print(f"Page {page_num} returned status {response.status_code}.")
+                    # কিছু পেজ মিস হলেও পরের পেজগুলোতে যাওয়ার সুযোগ রাখা
+                    if page_num > 10:
+                        break
+                    continue
                 
                 soup = BeautifulSoup(response.text, 'html.parser')
                 new_items = extract_items_from_soup(soup, seen_urls)
                 
                 if not new_items:
-                    print(f"No more items found on page {page_num}. Stopping.")
-                    break
-                    
-                all_items_meta.extend(new_items)
-                print(f"Total collected items metadata so far: {len(all_items_meta)}")
+                    print(f"No new items on page {page_num}.")
+                    if page_num > 5:
+                        break
+                else:
+                    all_items_meta.extend(new_items)
+                    print(f"Total collected items metadata so far: {len(all_items_meta)}")
                 
-                # যদি পর্যাপ্ত আইটেম হয়ে যায় (যেমন ১৬০০+) তবে থামবে
-                if len(all_items_meta) >= 1800:
+                # লক্ষ্য মাত্রা ১৫০০-১৬০০ আইটেম
+                if len(all_items_meta) >= 1600:
                     break
             except Exception as e:
-                print(f"Error fetching page {page_num}: {str(e)}")
-                break
+                print(f"Error on page {page_num}: {str(e)}")
+                continue
 
         total_items = len(all_items_meta)
         print(f"\nTotal items to process: {total_items}. Running multi-threaded execution...")
