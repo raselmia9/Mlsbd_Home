@@ -158,7 +158,7 @@ def process_single_item(item):
 
 def extract_items_from_soup(soup, seen_urls):
     items = []
-    # ওয়েবসাইটের মূল পোস্ট ব্লকগুলো নিখুঁতভাবে ধরার জন্য সিলেক্টর ব্রড করা হলো যাতে প্রথম আইটেম সহ সব আসে
+    # ওয়েবসাইটের মূল পোস্ট কার্ডগুলো নিখুঁতভাবে ফেচ করার জন্য সিলেক্টর
     cards = soup.find_all(['article', 'div'], class_=lambda x: x and any(c in x.lower() for c in ['item', 'post', 'card', 'box', 'content']))
     
     for card in cards:
@@ -173,13 +173,11 @@ def extract_items_from_soup(soup, seen_urls):
         if not is_valid_post_url(detail_url) or detail_url in seen_urls:
             continue
             
-        # ইমেজ বা লোগো সংগ্রহ
         img_tag = card.find('img')
         img_url = ""
         if img_tag:
             img_url = img_tag.get('data-src') or img_tag.get('src') or img_tag.get('data-lazy-src') or img_tag.get('srcset')
         
-        # টাইটেল সংগ্রহ
         title_tag = card.find(['h2', 'h3', 'h1', 'span'], class_=lambda x: x and 'title' in x.lower())
         if not title_tag:
             title_tag = card.find(['h2', 'h3', 'h1'])
@@ -191,7 +189,6 @@ def extract_items_from_soup(soup, seen_urls):
         else:
             title = clean_title_from_url(detail_url)
 
-        # কোনো আইটেম বাদ না দিয়ে সোজা যুক্ত করা হচ্ছে
         seen_urls.add(detail_url)
         items.append({
             "title": title,
@@ -206,38 +203,41 @@ def scrape_mlsbd():
     scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'linux', 'desktop': True})
     
     try:
-        response = scraper.get(BASE_URL, timeout=20)
-        if response.status_code != 200:
-            raise Exception(f"Failed to fetch homepage, status code: {response.status_code}")
-            
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
         seen_urls = set()
-        all_items_meta = extract_items_from_soup(soup, seen_urls)
-        print(f"Initial items found on homepage: {len(all_items_meta)}")
+        all_items_meta = []
 
-        # ১৫০০-১৬০০ আইটেম পাওয়ার জন্য পেজিনেশন লুপ (সর্বোচ্চ ৮০ পেজ পর্যন্ত)
-        max_pages = 80
-        for page_num in range(2, max_pages + 2):
-            page_url = f"{BASE_URL}page/{page_num}/"
+        # মাল্টি-পেজ বা পেজিনেশন লুপ যা মোর বাটন বা পেজ সংখ্যা অনুযায়ী একেবারে শেষ পর্যন্ত ডেটা টেনে আনবে
+        # এখানে ১০০ পেজ পর্যন্ত ট্রাই করা হবে যাতে সব মুভি ও সিরিজ চলে আসে
+        max_pages = 100
+        for page_num in range(1, max_pages + 1):
+            if page_num == 1:
+                page_url = BASE_URL
+            else:
+                # ওয়ার্ডপ্রেস সাইটের স্ট্যান্ডার্ড পেজিনেশন স্ট্রাকচার
+                page_url = f"{BASE_URL}page/{page_num}/"
+
+            print(f"Fetching page {page_num}: {page_url}")
             try:
-                page_resp = scraper.get(page_url, timeout=10)
-                if page_resp.status_code != 200:
-                    print("Reached end of pages.")
+                response = scraper.get(page_url, timeout=12)
+                if response.status_code != 200:
+                    print(f"Page {page_num} returned status {response.status_code}. Stopping pagination.")
                     break
                 
-                page_soup = BeautifulSoup(page_resp.text, 'html.parser')
-                new_items = extract_items_from_soup(page_soup, seen_urls)
+                soup = BeautifulSoup(response.text, 'html.parser')
+                new_items = extract_items_from_soup(soup, seen_urls)
                 
                 if not new_items:
+                    print(f"No more items found on page {page_num}. Stopping.")
                     break
                     
                 all_items_meta.extend(new_items)
-                print(f"Total collected items metadata: {len(all_items_meta)}")
+                print(f"Total collected items metadata so far: {len(all_items_meta)}")
                 
-                if len(all_items_meta) >= 1600:
+                # যদি পর্যাপ্ত আইটেম হয়ে যায় (যেমন ১৬০০+) তবে থামবে
+                if len(all_items_meta) >= 1800:
                     break
-            except:
+            except Exception as e:
+                print(f"Error fetching page {page_num}: {str(e)}")
                 break
 
         total_items = len(all_items_meta)
