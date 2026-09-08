@@ -20,7 +20,7 @@ def clean_title_from_url(url):
         return "Unknown Title"
 
 def clean_episode_name(text):
-    """এপিসোড নাম থেকে অতিরিক্ত অংশ রিমুভ করার ফাংশন"""
+    """এপিসোড নাম থেকে 'Download Now' বা অতিরিক্ত অংশ রিমুভ করার ফাংশন"""
     if not text:
         return ""
     cleaned = text.strip()
@@ -29,84 +29,31 @@ def clean_episode_name(text):
     cleaned = cleaned.lstrip("-: ").strip()
     return cleaned if cleaned else text
 
-def resolve_hubcloud_and_multicloud(scraper, page_url):
-    """
-    ১. HubCloud লিংকের ক্ষেত্রে জেনারেটর পেজ বা বাটন হ্যান্ডেল করে PixelServer লিংক কালেক্ট করবে।
-    ২. MultiCloud লিংকের ক্ষেত্রে পেজের ভেতর থেকে ডাইরেক্ট ডাউনলোডের লিংকগুলো কালেক্ট করবে।
-    """
-    final_links = []
+def extract_target_download_links(scraper, quality_url):
+    """ইন্টারমিডিয়েট পেজ ভিজিট করে নির্দিষ্ট ডোমেইনের লিংকগুলো কালেক্ট করবে"""
+    target_links = []
     try:
-        response = scraper.get(page_url, timeout=10)
-        if response.status_code != 200:
-            return final_links
-            
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # কেস ১: যদি এটি HubCloud লিংক হয় (hubcloud.foo / hubcloud.cx ইত্যাদি)
-        if 'hubcloud' in page_url:
-            # HubCloud পেজে "Generate Direct Download Link" বাটন বা ফর্ম খোঁজা
-            for a_tag in soup.find_all(['a', 'button'], href=True):
-                btn_text = a_tag.get_text(strip=True).lower()
-                if 'generate' in btn_text or 'direct' in btn_text:
-                    gen_url = a_tag['href']
-                    if not gen_url.startswith('http'):
-                        # রিলেটিভ ইউআরএল হ্যান্ডেল করা
-                        from urllib.parse import urljoin
-                        gen_url = urljoin(page_url, gen_url)
-                    
-                    # জেনারেটর পেজে প্রবেশ করা
-                    gen_response = scraper.get(gen_url, timeout=10)
-                    if gen_response.status_code == 200:
-                        gen_soup = BeautifulSoup(gen_response.text, 'html.parser')
-                        # PixelServer লিংক খোঁজা
-                        for p_tag in gen_soup.find_all('a', href=True):
-                            p_text = p_tag.get_text(strip=True).lower()
-                            p_href = p_tag['href']
-                            if 'pixelserver' in p_text or 'pixelserver' in p_href or 'hubcloud' in p_href:
-                                if p_href not in final_links and 'video/' in p_href:
-                                    final_links.append(p_href)
-            
-            # যদি সরাসরি পেজেই পিক্সেল সার্ভার লিংক বা ডাউনলোডের লিংক থাকে
-            if not final_links:
-                for a_tag in soup.find_all('a', href=True):
-                    href = a_tag['href']
-                    text = a_tag.get_text(strip=True).lower()
-                    if 'pixelserver' in text or 'pixelserver' in href:
-                        if href not in final_links:
-                            final_links.append(href)
-
-        # কেস ২: যদি এটি MultiCloud Links বা অন্যান্য টার্গেট লিংক হয়
-        elif 'multicloudlinks.com' in page_url:
-            for a_tag in soup.find_all('a', href=True):
-                href = a_tag['href']
-                text = a_tag.get_text(strip=True).lower()
-                # পিক্সেলড্রেইন বা মাল্টিক্লাউড রিলেটেড সার্ভার লিংক ফিল্টার করা
-                if any(keyword in text or keyword in href for keyword in ['pixel', 'turbo', 'mirror', 'download']):
-                    if href not in final_links and not href.startswith('#'):
-                        final_links.append(href)
-        
-        # সাধারণ ফলব্যাক: যদি সরাসরি নির্দিষ্ট ডোমেইনের লিংক পেয়ে যায়
-        if not final_links:
+        response = scraper.get(quality_url, timeout=10)
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, 'html.parser')
             for a_tag in soup.find_all('a', href=True):
                 href = a_tag['href']
                 if 'hubcloud.foo/video/' in href or 'new2.multicloudlinks.com' in href:
-                    if href not in final_links:
-                        final_links.append(href)
-
+                    if href not in target_links:
+                        target_links.append(href)
     except Exception as e:
         pass
-        
-    return final_links
+    return target_links
 
 def process_single_quality(scraper, q_name, q_href):
-    """একটি নির্দিষ্ট কোয়ালিটির লিংক প্যারালালি প্রসেস করার ফাংশন"""
-    target_links = resolve_hubcloud_and_multicloud(scraper, q_href)
+    """একটি নির্দিষ্ট কোয়ালিটির লিংক রেজলভ করার হেল্পার ফাংশন"""
+    target_links = extract_target_download_links(scraper, q_href)
     if target_links:
         return q_name, target_links
     return None
 
 def scrape_detail_page(scraper, detail_url):
-    """প্রতিটি ডিটেইল পেজ থেকে প্যারালাল ট্যাবের মাধ্যমে দ্রুত ডেটা সংগ্রহ করবে"""
+    """প্রতিটি ডিটেইল পেজে প্রবেশ করে এপিসোড বা কোয়ালিটি লিংক মাল্টিথ্রেডিংয়ের মাধ্যমে দ্রুত সংগ্রহ করবে"""
     item_data = {
         "detail_url": detail_url,
         "type": "movie",
@@ -120,7 +67,7 @@ def scrape_detail_page(scraper, detail_url):
             
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # সিরিজ বা এপিসোড চেক করা
+        # ১. সিরিজ বা মাল্টি-এপিসোড চেক করা
         text_nodes = soup.find_all(string=lambda t: t and ('epi' in t.lower() or 'episode' in t.lower()))
         
         seen_episodes = set()
@@ -139,6 +86,7 @@ def scrape_detail_page(scraper, detail_url):
                     qualities_map = {}
                     container = parent.find_parent(['div', 'section', 'p', 'tr', 'li'])
                     if container:
+                        # প্রতিটি এপিসোডের কোয়ালিটি লিংকগুলো থ্রেডপুল দিয়ে একসঙ্গে ফেচ করা
                         quality_tasks = []
                         for a_tag in container.find_all('a', href=True):
                             link_text = a_tag.get_text(strip=True).lower()
@@ -152,7 +100,7 @@ def scrape_detail_page(scraper, detail_url):
                                     quality_tasks.append((q, link_href))
                                     break
                         
-                        # প্যারালালি এপিসোডের সব কোয়ালিটি ফেচ করা
+                        # মাল্টিথ্রেডিং ব্যবহার করে একই এপিসোডের সব রেজুলেশন একসঙ্গে ফেচ করা
                         if quality_tasks:
                             with ThreadPoolExecutor(max_workers=5) as q_executor:
                                 future_to_q = {q_executor.submit(process_single_quality, scraper, q_name, q_href): q_name for q_name, q_href in quality_tasks}
@@ -173,7 +121,7 @@ def scrape_detail_page(scraper, detail_url):
             item_data["episodes"] = episodes_list
             item_data.pop("download_links", None)
         else:
-            # মুভির ক্ষেত্রে প্যারালাল প্রসেসিং
+            # মুভির ক্ষেত্রে কোয়ালিটি লিংকগুলো মাল্টিথ্রেডিংয়ে প্রসেস করা
             movie_quality_tasks = []
             for a_tag in soup.find_all('a', href=True):
                 text = a_tag.get_text(strip=True).lower()
@@ -207,10 +155,10 @@ def scrape_detail_page(scraper, detail_url):
         return item_data
 
 def process_single_item(item):
-    """প্রতিটি আইটেম প্যারালাল থ্রেডে প্রসেস করার ফাংশন"""
+    """ব্যাচের প্রতিটি আইটেম আলাদা থ্রেডে প্রসেস করার ফাংশন"""
     scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'linux', 'desktop': True})
     try:
-        print(f"Crawling & Resolving Pixels: {item['title']}")
+        print(f"Crawling & Resolving: {item['title']}")
         detail_info = scrape_detail_page(scraper, item['detail_url'])
         
         item_entry = {
@@ -284,10 +232,11 @@ def scrape_mlsbd():
             })
 
         total_items = len(all_items_meta)
-        print(f"Total valid items found: {total_items}. Processing in batches of {BATCH_SIZE} with Parallel Threads...")
+        print(f"Total valid items found: {total_items}. Processing in batches of {BATCH_SIZE} with Multi-threading...")
 
         movies_data = []
         
+        # ব্যাচ বাই ব্যাচ মাল্টিথ্রেডিং প্রসেসিং
         for i in range(0, total_items, BATCH_SIZE):
             batch = all_items_meta[i:i + BATCH_SIZE]
             batch_num = (i // BATCH_SIZE) + 1
@@ -301,13 +250,14 @@ def scrape_mlsbd():
                     if result:
                         movies_data.append(result)
             
+            # প্রতি ব্যাচ শেষে সেভ করা
             with open('multilink.json', 'w', encoding='utf-8') as f:
                 json.dump(movies_data, f, ensure_ascii=False, indent=4)
             print(f"Batch {batch_num} saved successfully.")
 
         print(f"\nSuccessfully completed! All {len(movies_data)} items saved to multilink.json")
 
-        status_message = f"SUCCESS: Multi-threaded Pixel scraping completed. Scraped {len(movies_data)} items at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        status_message = f"SUCCESS: Multi-threaded Phase completed. Scraped {len(movies_data)} items at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         with open('status.txt', 'w', encoding='utf-8') as f:
             f.write(status_message)
 
