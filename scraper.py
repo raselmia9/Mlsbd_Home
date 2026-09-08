@@ -39,7 +39,8 @@ def is_valid_post_url(url):
 
 def scrape_detail_page_fast(scraper, detail_url):
     """
-    ডিটেইল পেজ থেকে প্রতিটি কোয়ালিটির জন্য একটি মাত্র সঠিক লিংক সংগ্রহ করবে।
+    ডিটেইল পেজ থেকে প্রতিটি কোয়ালিটির সঠিক লিংক সংগ্রহ করবে। 
+    যদি ৭২০পি বা অন্যান্য রেজুলেশন থাকে, তবে 'watch online' বাদ দেওয়া হবে।
     """
     item_data = {
         "detail_url": detail_url,
@@ -77,14 +78,21 @@ def scrape_detail_page_fast(scraper, detail_url):
                             link_text = a_tag.get_text(strip=True).lower()
                             link_href = a_tag['href']
                             
+                            # ক্যাটাগরি বা ভুল লিংক ফিল্টার করা, শুধুমাত্র savelinks বা ডাউনলোডেবল লিংক রাখা
                             if '4k' in link_text or '4k' in link_href:
+                                continue
+                            if '/category/' in link_href: # ক্যাটাগরি পেজ বাদ দেওয়ার জন্য
                                 continue
                                 
                             for q in ['360p', '480p', '720p', '1080p', 'watch online']:
-                                # যদি কোয়ালিটি মিলে এবং সেই কোয়ালিটির লিংক আগে থেকে সেভ করা না থাকে (প্রতিটিতে একটি মাত্র লিংক)
                                 if q in link_text and q not in qualities_map:
                                     qualities_map[q] = link_href
                                     break
+
+                    # যদি ৭২০পি বা অন্য রেজুলেশন থাকে, তবে 'watch online' বাদ দেওয়া
+                    has_resolution = any(q in qualities_map for q in ['360p', '480p', '720p', '1080p'])
+                    if has_resolution and 'watch online' in qualities_map:
+                        del qualities_map['watch online']
 
                     if qualities_map:
                         episodes_list.append({
@@ -104,11 +112,18 @@ def scrape_detail_page_fast(scraper, detail_url):
                 
                 if '4k' in text or '4k' in href:
                     continue
+                if '/category/' in href:
+                    continue
                 
                 for q in ['360p', '480p', '720p', '1080p', 'watch online']:
                     if q in text and q not in qualities_map:
                         qualities_map[q] = href
                         break
+            
+            # যদি নির্দিষ্ট রেজুলেশন থাকে, তবে 'watch online' বাদ দেওয়া
+            has_resolution = any(q in qualities_map for q in ['360p', '480p', '720p', '1080p'])
+            if has_resolution and 'watch online' in qualities_map:
+                del qualities_map['watch online']
             
             item_data["type"] = "movie"
             item_data["download_links"] = qualities_map
@@ -150,6 +165,7 @@ def process_single_item(item):
 
 def extract_items_from_soup(soup, seen_urls):
     items = []
+    # হোমপেজের প্রথম দিকের আইটেম যাতে বাদ না পড়ে, সেজন্য সব ধরনের পোস্ট কার্ড সিলেক্টর ভালোভাবে হ্যান্ডেল করা হলো
     cards = soup.find_all(['article', 'div'], class_=lambda x: x and any(c in x.lower() for c in ['item', 'post', 'card', 'box']))
     
     for card in cards:
@@ -205,7 +221,7 @@ def scrape_mlsbd():
         all_items_meta = extract_items_from_soup(soup, seen_urls)
         print(f"Initial items found on homepage: {len(all_items_meta)}")
 
-        # ১৫০০-১৬০০ আইটেম পাওয়ার জন্য পেজের সীমা বাড়িয়ে প্রায় ৭০-৮০ পেজ পর্যন্ত করা হলো
+        # ১৫০০-১৬০০ আইটেম পাওয়ার জন্য পেজের সীমা নির্ধারণ (প্রায় ৭০-৮০ পেজ)
         max_pages = 80
         for page_num in range(2, max_pages + 2):
             page_url = f"{BASE_URL}page/{page_num}/"
@@ -224,7 +240,6 @@ def scrape_mlsbd():
                 all_items_meta.extend(new_items)
                 print(f"Total collected items metadata: {len(all_items_meta)}")
                 
-                # যদি ১৫০০ বা এর বেশি আইটেম হয়ে যায় তবে লুপ থামিয়ে দিতে পারি
                 if len(all_items_meta) >= 1600:
                     break
             except:
@@ -265,4 +280,3 @@ def scrape_mlsbd():
 
 if __name__ == "__main__":
     scrape_mlsbd()
-
