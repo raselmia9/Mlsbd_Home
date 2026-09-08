@@ -27,13 +27,29 @@ def clean_episode_name(text):
     cleaned = cleaned.lstrip("-: ").strip()
     return cleaned if cleaned else text
 
+def extract_target_download_links(scraper, quality_url):
+    """ইন্টারমিডিয়েট পেজ ভিজিট করে নির্দিষ্ট ডোমেইনের লিংকগুলো কালেক্ট করবে"""
+    target_links = []
+    try:
+        response = scraper.get(quality_url, timeout=10)
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, 'html.parser')
+            for a_tag in soup.find_all('a', href=True):
+                href = a_tag['href']
+                # কাঙ্ক্ষিত দুটি ডোমেইন ফিল্টার করা
+                if 'hubcloud.foo/video/' in href or 'new2.multicloudlinks.com' in href:
+                    if href not in target_links:
+                        target_links.append(href)
+    except Exception as e:
+        print(f"Error resolving link {quality_url}: {e}")
+    return target_links
+
 def scrape_detail_page(scraper, detail_url):
-    """প্রতিটি ডিটেইল পেজে প্রবেশ করে এপিসোড বা কোয়ালিটি লিংক সংগ্রহ করবে (4K বাদে)"""
+    """প্রতিটি ডিটেইল পেজে প্রবেশ করে এপিসোড বা কোয়ালিটি লিংক সংগ্রহ ও প্রসেস করবে"""
     item_data = {
         "detail_url": detail_url,
         "type": "movie",
-        "qualities": {},
-        "episodes": []
+        "download_links": {}
     }
     
     try:
@@ -43,10 +59,12 @@ def scrape_detail_page(scraper, detail_url):
             
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # এপিসোড বা বাটনগুলো খোঁজা
+        # ১. সিরিজ বা মাল্টি-এপিসোড চেক করা
         text_nodes = soup.find_all(string=lambda t: t and ('epi' in t.lower() or 'episode' in t.lower()))
         
         seen_episodes = set()
+        episodes_list = []
+        
         for node in text_nodes:
             parent = node.parent
             raw_ep_text = node.strip()
@@ -57,50 +75,55 @@ def scrape_detail_page(scraper, detail_url):
                 if ep_text and ep_text not in seen_episodes:
                     seen_episodes.add(ep_text)
                     
-                    ep_links = {}
+                    qualities_map = {}
                     container = parent.find_parent(['div', 'section', 'p', 'tr', 'li'])
                     if container:
                         for a_tag in container.find_all('a', href=True):
                             link_text = a_tag.get_text(strip=True).lower()
                             link_href = a_tag['href']
                             
-                            # '4k' কে সম্পূর্ণ বাদ দেওয়া হয়েছে এবং বাকিগুলো ফিল্টার করা হচ্ছে
+                            # 4K সম্পূর্ণ বাদ দেওয়া এবং অন্যান্য কোয়ালিটি ট্র্যাক করা
+                            if '4k' in link_text or '4k' in link_href:
+                                continue
+                                
                             for q in ['360p', '480p', '720p', '1080p', 'watch online']:
                                 if q in link_text:
-                                    ep_links[q] = link_href
+                                    # রিডাইরেক্ট লিংক থেকে টার্গেট লিংকগুলো বের করা
+                                    target_links = extract_target_download_links(scraper, link_href)
+                                    if target_links:
+                                        qualities_map[q] = target_links
                                     break
-                            else:
-                                if 'watch' in link_text or 'online' in link_text:
-                                    if '4k' not in link_text:
-                                        ep_links['watch_online'] = link_href
 
-                    if ep_links:
-                        item_data["episodes"].append({
+                    if qualities_map:
+                        episodes_list.append({
                             "episode_name": ep_text,
-                            "qualities": ep_links
+                            "download_links": qualities_map
                         })
 
-        if item_data["episodes"]:
+        if episodes_list:
             item_data["type"] = "series"
+            item_data["episodes"] = episodes_list
+            # সিরিজ হলে রুট লেভেলের download_links দরকার নেই
+            item_data.pop("download_links", None)
         else:
-            qualities_dict = {}
+            # মুভির ক্ষেত্রে কোয়ালিটি লিংক প্রসেস করা
+            qualities_map = {}
             for a_tag in soup.find_all('a', href=True):
                 text = a_tag.get_text(strip=True).lower()
                 href = a_tag['href']
                 
-                # মুভির ক্ষেত্রেও '4k' ফিল্টার করে বাদ দেওয়া হবে
                 if '4k' in text or '4k' in href:
                     continue
                 
                 for q in ['360p', '480p', '720p', '1080p', 'watch online']:
                     if q in text:
-                        qualities_dict[q] = href
+                        target_links = extract_target_download_links(scraper, href)
+                        if target_links:
+                            qualities_map[q] = target_links
                         break
-                else:
-                    if 'watch' in text or 'online' in text:
-                        qualities_dict['watch_online'] = href
             
-            item_data["qualities"] = qualities_dict
+            item_data["type"] = "movie"
+            item_data["download_links"] = qualities_map
 
         return item_data
 
@@ -164,12 +187,11 @@ def scrape_mlsbd():
             all_items_meta.append({
                 "title": title,
                 "logo_url": img_url if img_url else "",
-                "detail_url": detail_url,
-                "card": card
+                "detail_url": detail_url
             })
 
         total_items = len(all_items_meta)
-        print(f"Total valid items found: {total_items}. Processing in batches of {BATCH_SIZE} (Skipping 4K)...")
+        print(f"Total valid items found: {total_items}. Processing in batches of {BATCH_SIZE}...")
 
         movies_data = []
         
@@ -180,7 +202,7 @@ def scrape_mlsbd():
             
             for index, item in enumerate(batch, start=i+1):
                 try:
-                    print(f"[{index}/{total_items}] Crawling: {item['title']}")
+                    print(f"[{index}/{total_items}] Crawling & Resolving Links: {item['title']}")
                     detail_info = scrape_detail_page(scraper, item['detail_url'])
                     
                     item_entry = {
@@ -193,7 +215,7 @@ def scrape_mlsbd():
                     if detail_info["type"] == "series":
                         item_entry["episodes"] = detail_info["episodes"]
                     else:
-                        item_entry["qualities"] = detail_info["qualities"]
+                        item_entry["download_links"] = detail_info["download_links"]
 
                     movies_data.append(item_entry)
                     time.sleep(0.5)
@@ -207,7 +229,7 @@ def scrape_mlsbd():
 
         print(f"\nSuccessfully completed! All {len(movies_data)} items saved to multilink.json")
 
-        status_message = f"SUCCESS: Scraped {len(movies_data)} items (without 4K) successfully at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        status_message = f"SUCCESS: Phase 3 completed. Scraped {len(movies_data)} items at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         with open('status.txt', 'w', encoding='utf-8') as f:
             f.write(status_message)
 
