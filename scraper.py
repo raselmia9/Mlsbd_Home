@@ -20,8 +20,10 @@ def clean_episode_name(text):
     if not text:
         return ""
     cleaned = text.strip()
+    # যদি লেখাটি 'download now' দিয়ে শুরু হয়, তবে তা রিমুভ করে দেব
     if cleaned.lower().startswith("download now"):
-        cleaned = cleaned[12:].strip()
+        cleaned = cleaned[12:].strip() # 'download now' এর দৈর্ঘ্য ১২
+    # অতিরিক্ত হাইফন বা কোলন থাকলে তা পরিষ্কার করা
     cleaned = cleaned.lstrip("-: ").strip()
     return cleaned if cleaned else text
 
@@ -35,13 +37,13 @@ def scrape_detail_page(scraper, detail_url):
     }
     
     try:
-        response = scraper.get(detail_url, timeout=15)
+        response = scraper.get(detail_url, timeout=20)
         if response.status_code != 200:
             return item_data
             
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # এপিসোড বাটন বা টেক্সট খোঁজা
+        # টেক্সট নোড বা বাটনগুলো থেকে এপিসোড খোঁজা
         text_nodes = soup.find_all(string=lambda t: t and ('epi' in t.lower() or 'episode' in t.lower()))
         
         seen_episodes = set()
@@ -56,7 +58,7 @@ def scrape_detail_page(scraper, detail_url):
                     seen_episodes.add(ep_text)
                     
                     ep_links = {}
-                    container = parent.find_parent(['div', 'section', 'p', 'tr', 'li'])
+                    container = parent.find_parent(['div', 'section', 'p', 'tr'])
                     if container:
                         for a_tag in container.find_all('a', href=True):
                             link_text = a_tag.get_text(strip=True).lower()
@@ -70,7 +72,7 @@ def scrape_detail_page(scraper, detail_url):
                                 if 'watch' in link_text or 'online' in link_text:
                                     ep_links['watch_online'] = link_href
 
-                    if ep_links:
+                    if ep_links: # যদি এই এপিসোডের কোনো লিংক পাওয়া যায়
                         item_data["episodes"].append({
                             "episode_name": ep_text,
                             "qualities": ep_links
@@ -79,7 +81,7 @@ def scrape_detail_page(scraper, detail_url):
         if item_data["episodes"]:
             item_data["type"] = "series"
         else:
-            # সাধারণ মুভির জন্য কোয়ালিটি লিংক সংগ্রহ
+            # যদি সিরিজ না হয়ে সাধারণ মুভি হয়
             qualities_dict = {}
             for a_tag in soup.find_all('a', href=True):
                 text = a_tag.get_text(strip=True).lower()
@@ -126,7 +128,7 @@ def scrape_mlsbd():
         if not cards:
             cards = soup.find_all('div', class_=lambda x: x and ('post' in x or 'item' in x or 'card' in x))
 
-        print(f"Found {len(cards)} items on homepage. Processing all sequentially...")
+        print(f"Found {len(cards)} items on homepage. Processing all...")
 
         for index, card in enumerate(cards):
             try:
@@ -154,7 +156,7 @@ def scrape_mlsbd():
                 else:
                     title = clean_title_from_url(detail_url)
 
-                print(f"[{index+1}/{len(cards)}] Processing item: {title}")
+                print(f"[{index+1}/{len(cards)}] Crawling: {title}")
                 
                 # ডিটেইল পেজ ক্রল করা
                 detail_info = scrape_detail_page(scraper, detail_url)
@@ -174,14 +176,15 @@ def scrape_mlsbd():
                 movies_data.append(item_entry)
 
             except Exception as e:
-                print(f"Error on card {index+1}: {e}")
+                print(f"Skipping an item due to error: {e}")
                 continue
 
         # আউটপুট জেসন ফাইল সেভ করা
         with open('multilink.json', 'w', encoding='utf-8') as f:
             json.dump(movies_data, f, ensure_ascii=False, indent=4)
-        print(f"Successfully saved all {len(movies_data)} items to multilink.json")
+        print(f"Successfully saved {len(movies_data)} items to multilink.json")
 
+        # স্ট্যাটাস ফাইল তৈরি করা
         status_message = f"SUCCESS: Scraped {len(movies_data)} items successfully at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         with open('status.txt', 'w', encoding='utf-8') as f:
             f.write(status_message)
