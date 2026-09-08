@@ -51,7 +51,6 @@ def scrape_detail_page_fast(scraper, detail_url):
             
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # সিরিজ বা এপিসোড চেক করা
         text_nodes = soup.find_all(string=lambda t: t and ('epi' in t.lower() or 'episode' in t.lower()))
         
         seen_episodes = set()
@@ -138,6 +137,7 @@ def process_single_item(item):
                 "title": item['title'],
                 "logo_url": item['logo_url'],
                 "detail_url": item['detail_url'],
+                "date_time": item['date_time'],  # ডেট ও টাইম যুক্ত করা হলো
                 "type": "series",
                 "episodes": detail_info["episodes"]
             }
@@ -148,15 +148,16 @@ def process_single_item(item):
                 "title": item['title'],
                 "logo_url": item['logo_url'],
                 "detail_url": item['detail_url'],
+                "date_time": item['date_time'],  # ডেট ও টাইম যুক্ত করা হলো
                 "type": "movie",
                 "download_links": detail_info["download_links"]
             }
             
-        return item_entry
+        return (item['original_index'], item_entry)
     except Exception as e:
         return None
 
-def extract_items_from_soup(soup, seen_urls):
+def extract_items_from_soup(soup, seen_urls, global_index_counter):
     items = []
     cards = soup.find_all(['article', 'div'], class_=lambda x: x and any(c in x.lower() for c in ['item', 'post', 'card', 'box', 'content']))
     
@@ -172,11 +173,13 @@ def extract_items_from_soup(soup, seen_urls):
         if not is_valid_post_url(detail_url) or detail_url in seen_urls:
             continue
             
+        # ইমেজ বা লোগো সংগ্রহ
         img_tag = card.find('img')
         img_url = ""
         if img_tag:
             img_url = img_tag.get('data-src') or img_tag.get('src') or img_tag.get('data-lazy-src') or img_tag.get('srcset')
         
+        # টাইটেল সংগ্রহ
         title_tag = card.find(['h2', 'h3', 'h1', 'span'], class_=lambda x: x and 'title' in x.lower())
         if not title_tag:
             title_tag = card.find(['h2', 'h3', 'h1'])
@@ -188,12 +191,30 @@ def extract_items_from_soup(soup, seen_urls):
         else:
             title = clean_title_from_url(detail_url)
 
+        # ডেট এবং টাইম বা পোস্টের সময় সংগ্রহ (যেমন: "24 hours ago" বা নির্দিষ্ট ডেট)
+        date_time_str = ""
+        # ওয়েবসাইটের কার্ডে সাধারণত time ট্যাগ বা ডেটের ক্লাস থাকে
+        time_tag = card.find(['span', 'time', 'div'], class_=lambda x: x and any(c in x.lower() for c in ['date', 'time', 'posted', 'ago']))
+        if time_tag:
+            date_time_str = time_tag.get_text(strip=True)
+        else:
+            # বিকল্প হিসেবে পুরো কার্ডের টেক্সট থেকে সময় খোঁজা
+            for span in card.find_all(['span', 'p']):
+                txt = span.get_text(strip=True)
+                if 'ago' in txt.lower() or '202' in txt or 'hour' in txt.lower() or 'day' in txt.lower():
+                    date_time_str = txt
+                    break
+
         seen_urls.add(detail_url)
         items.append({
+            "original_index": global_index_counter[0],
             "title": title,
             "logo_url": img_url if img_url else "",
-            "detail_url": detail_url
+            "detail_url": detail_url,
+            "date_time": date_time_str
         })
+        global_index_counter[0] += 1
+        
     return items
 
 def scrape_mlsbd():
@@ -204,31 +225,26 @@ def scrape_mlsbd():
     try:
         seen_urls = set()
         all_items_meta = []
+        global_index_counter = [0]  # সিকিয়েন্স বা সিরিয়াল ঠিক রাখার জন্য কাউন্টার
 
-        # ওয়ার্ডপ্রেসের বিভিন্ন ফরম্যাটের পেজিনেশন এবং এজেক্স লোডিং হ্যান্ডেল করার জন্য ফ্লেক্সিবল লুপ
-        # হোমপেজ থেকে শুরু করে পর্যায়ক্রমে পেজ বাড়াতে থাকা
         max_pages = 150
         for page_num in range(1, max_pages + 1):
-            # সাইটের স্ট্রাকচার অনুযায়ী পেজ ইউআরএল প্যাটার্ন
             if page_num == 1:
                 page_url = BASE_URL
             else:
-                # কখনো /page/2/ অথবা কখনো অন্য প্যারামিটার হতে পারে, ওয়ার্ডপ্রেসের স্ট্যান্ডার্ড রাখা হলো
                 page_url = f"{BASE_URL}page/{page_num}/"
 
             print(f"Fetching page {page_num}: {page_url}")
             try:
                 response = scraper.get(page_url, timeout=12)
                 if response.status_code != 200:
-                    # যদি পেজ না পায়, তবে ওয়ার্ডপ্রেসের পোস্ট অফসেট বা এজোক্স স্টাইলে ট্রাই করার জন্য লুপ চালিয়ে যাওয়া বা بریک করা
                     print(f"Page {page_num} returned status {response.status_code}.")
-                    # কিছু পেজ মিস হলেও পরের পেজগুলোতে যাওয়ার সুযোগ রাখা
                     if page_num > 10:
                         break
                     continue
                 
                 soup = BeautifulSoup(response.text, 'html.parser')
-                new_items = extract_items_from_soup(soup, seen_urls)
+                new_items = extract_items_from_soup(soup, seen_urls, global_index_counter)
                 
                 if not new_items:
                     print(f"No new items on page {page_num}.")
@@ -238,7 +254,6 @@ def scrape_mlsbd():
                     all_items_meta.extend(new_items)
                     print(f"Total collected items metadata so far: {len(all_items_meta)}")
                 
-                # লক্ষ্য মাত্রা ১৫০০-১৬০০ আইটেম
                 if len(all_items_meta) >= 1600:
                     break
             except Exception as e:
@@ -248,7 +263,7 @@ def scrape_mlsbd():
         total_items = len(all_items_meta)
         print(f"\nTotal items to process: {total_items}. Running multi-threaded execution...")
 
-        movies_data = []
+        processed_results = []
         
         for i in range(0, total_items, BATCH_SIZE):
             batch = all_items_meta[i:i + BATCH_SIZE]
@@ -259,14 +274,18 @@ def scrape_mlsbd():
                 futures = {executor.submit(process_single_item, item): item for item in batch}
                 
                 for future in as_completed(futures):
-                    result = future.result()
-                    if result:
-                        movies_data.append(result)
-            
-            with open('multilink.json', 'w', encoding='utf-8') as f:
-                json.dump(movies_data, f, ensure_ascii=False, indent=4)
+                    res = future.result()
+                    if res:
+                        processed_results.append(res)
 
-        print(f"\nSuccessfully completed! All {len(movies_data)} items saved to multilink.json")
+        # মূল ওয়েবসাইটের সিরিয়াল (লেটেস্ট থেকে পুরাতন) অনুযায়ী সাজানো
+        processed_results.sort(key=lambda x: x[0])
+        movies_data = [item[1] for item in processed_results]
+
+        with open('multilink.json', 'w', encoding='utf-8') as f:
+            json.dump(movies_data, f, ensure_ascii=False, indent=4)
+
+        print(f"\nSuccessfully completed! All {len(movies_data)} items saved with correct serial and date_time to multilink.json")
 
         status_message = f"SUCCESS: Scraped {len(movies_data)} items at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         with open('status.txt', 'w', encoding='utf-8') as f:
