@@ -1,12 +1,10 @@
 import os
 import json
-import time
 from datetime import datetime
 import cloudscraper
 from bs4 import BeautifulSoup
 
 BASE_URL = "https://mlsbd.co/"
-BATCH_SIZE = 50  # প্রতিবারে ৫০টি করে আইটেম প্রসেস করার লিমিট
 
 def clean_title_from_url(url):
     """ইউআরএল থেকে সুন্দর একটি টাইটেল তৈরি করার ফাংশন"""
@@ -28,7 +26,7 @@ def clean_episode_name(text):
     return cleaned if cleaned else text
 
 def scrape_detail_page(scraper, detail_url):
-    """প্রতিটি ডিটেইল পেজে প্রবেশ করে এপিসোড বা কোয়ালিটি লিংক সংগ্রহ করবে (4K বাদে)"""
+    """প্রতিটি ডিটেইল পেজে প্রবেশ করে এপিসোড বা কোয়ালিটি লিংক সংগ্রহ করবে"""
     item_data = {
         "detail_url": detail_url,
         "type": "movie",
@@ -43,7 +41,7 @@ def scrape_detail_page(scraper, detail_url):
             
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # এপিসোড বা বাটনগুলো খোঁজা
+        # এপিসোড বাটন বা টেক্সট খোঁজা
         text_nodes = soup.find_all(string=lambda t: t and ('epi' in t.lower() or 'episode' in t.lower()))
         
         seen_episodes = set()
@@ -64,15 +62,13 @@ def scrape_detail_page(scraper, detail_url):
                             link_text = a_tag.get_text(strip=True).lower()
                             link_href = a_tag['href']
                             
-                            # '4k' কে সম্পূর্ণ বাদ দেওয়া হয়েছে এবং বাকিগুলো ফিল্টার করা হচ্ছে
-                            for q in ['360p', '480p', '720p', '1080p', 'watch online']:
+                            for q in ['360p', '480p', '720p', '1080p', '4k', 'watch online']:
                                 if q in link_text:
                                     ep_links[q] = link_href
                                     break
                             else:
                                 if 'watch' in link_text or 'online' in link_text:
-                                    if '4k' not in link_text:
-                                        ep_links['watch_online'] = link_href
+                                    ep_links['watch_online'] = link_href
 
                     if ep_links:
                         item_data["episodes"].append({
@@ -83,16 +79,13 @@ def scrape_detail_page(scraper, detail_url):
         if item_data["episodes"]:
             item_data["type"] = "series"
         else:
+            # সাধারণ মুভির জন্য কোয়ালিটি লিংক সংগ্রহ
             qualities_dict = {}
             for a_tag in soup.find_all('a', href=True):
                 text = a_tag.get_text(strip=True).lower()
                 href = a_tag['href']
                 
-                # মুভির ক্ষেত্রেও '4k' ফিল্টার করে বাদ দেওয়া হবে
-                if '4k' in text or '4k' in href:
-                    continue
-                
-                for q in ['360p', '480p', '720p', '1080p', 'watch online']:
+                for q in ['360p', '480p', '720p', '1080p', '4k', 'watch online']:
                     if q in text:
                         qualities_dict[q] = href
                         break
@@ -126,88 +119,70 @@ def scrape_mlsbd():
             
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        all_items_meta = []
+        movies_data = []
         seen_urls = set()
         
-        cards = soup.find_all(['article', 'div'], class_=lambda x: x and any(c in x.lower() for c in ['item', 'post', 'card', 'box']))
-        
-        for card in cards:
-            link_tag = card.find('a', href=True)
-            if not link_tag:
-                continue
+        cards = soup.select('article, .item, .post-item, .card, .post')
+        if not cards:
+            cards = soup.find_all('div', class_=lambda x: x and ('post' in x or 'item' in x or 'card' in x))
+
+        print(f"Found {len(cards)} items on homepage. Processing all sequentially...")
+
+        for index, card in enumerate(cards):
+            try:
+                img_tag = card.find('img')
+                img_url = ""
+                if img_tag:
+                    img_url = img_tag.get('data-src') or img_tag.get('src') or img_tag.get('data-lazy-src') or img_tag.get('srcset')
                 
-            detail_url = link_tag['href']
-            if not detail_url.startswith('http'):
-                continue
-                
-            if detail_url.rstrip('/') == BASE_URL.rstrip('/') or detail_url in seen_urls:
-                continue
-                
-            seen_urls.add(detail_url)
-            
-            img_tag = card.find('img')
-            img_url = ""
-            if img_tag:
-                img_url = img_tag.get('data-src') or img_tag.get('src') or img_tag.get('data-lazy-src') or img_tag.get('srcset')
-            
-            title_tag = card.find(['h2', 'h3', 'h1', 'span'], class_=lambda x: x and 'title' in x.lower())
-            if not title_tag:
-                title_tag = card.find(['h2', 'h3', 'h1'])
-
-            if title_tag and title_tag.get_text(strip=True):
-                title = title_tag.get_text(strip=True)
-            elif img_tag and img_tag.get('alt') and img_tag.get('alt').strip() != "Featured Image":
-                title = img_tag.get('alt').strip()
-            else:
-                title = clean_title_from_url(detail_url)
-
-            all_items_meta.append({
-                "title": title,
-                "logo_url": img_url if img_url else "",
-                "detail_url": detail_url,
-                "card": card
-            })
-
-        total_items = len(all_items_meta)
-        print(f"Total valid items found: {total_items}. Processing in batches of {BATCH_SIZE} (Skipping 4K)...")
-
-        movies_data = []
-        
-        for i in range(0, total_items, BATCH_SIZE):
-            batch = all_items_meta[i:i + BATCH_SIZE]
-            batch_num = (i // BATCH_SIZE) + 1
-            print(f"\n--- Processing Batch {batch_num} (Items {i+1} to {min(i + BATCH_SIZE, total_items)}) ---")
-            
-            for index, item in enumerate(batch, start=i+1):
-                try:
-                    print(f"[{index}/{total_items}] Crawling: {item['title']}")
-                    detail_info = scrape_detail_page(scraper, item['detail_url'])
-                    
-                    item_entry = {
-                        "title": item['title'],
-                        "logo_url": item['logo_url'],
-                        "detail_url": item['detail_url'],
-                        "type": detail_info["type"]
-                    }
-                    
-                    if detail_info["type"] == "series":
-                        item_entry["episodes"] = detail_info["episodes"]
-                    else:
-                        item_entry["qualities"] = detail_info["qualities"]
-
-                    movies_data.append(item_entry)
-                    time.sleep(0.5)
-                except Exception as e:
-                    print(f"Error on item {index}: {e}")
+                link_tag = card.find('a', href=True)
+                if not link_tag:
                     continue
-            
-            with open('multilink.json', 'w', encoding='utf-8') as f:
-                json.dump(movies_data, f, ensure_ascii=False, indent=4)
-            print(f"Batch {batch_num} saved successfully.")
+                    
+                detail_url = link_tag['href']
+                if detail_url.rstrip('/') == BASE_URL.rstrip('/') or detail_url in seen_urls:
+                    continue
+                    
+                seen_urls.add(detail_url)
+                
+                # টাইটেল বের করা
+                title_tag = card.find(['h2', 'h3', 'h1'])
+                if title_tag and title_tag.get_text(strip=True):
+                    title = title_tag.get_text(strip=True)
+                elif img_tag and img_tag.get('alt') and img_tag.get('alt').strip() != "Featured Image":
+                    title = img_tag.get('alt').strip()
+                else:
+                    title = clean_title_from_url(detail_url)
 
-        print(f"\nSuccessfully completed! All {len(movies_data)} items saved to multilink.json")
+                print(f"[{index+1}/{len(cards)}] Processing item: {title}")
+                
+                # ডিটেইল পেজ ক্রল করা
+                detail_info = scrape_detail_page(scraper, detail_url)
+                
+                item_entry = {
+                    "title": title,
+                    "logo_url": img_url if img_url else "",
+                    "detail_url": detail_url,
+                    "type": detail_info["type"]
+                }
+                
+                if detail_info["type"] == "series":
+                    item_entry["episodes"] = detail_info["episodes"]
+                else:
+                    item_entry["qualities"] = detail_info["qualities"]
 
-        status_message = f"SUCCESS: Scraped {len(movies_data)} items (without 4K) successfully at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                movies_data.append(item_entry)
+
+            except Exception as e:
+                print(f"Error on card {index+1}: {e}")
+                continue
+
+        # আউটপুট জেসন ফাইল সেভ করা
+        with open('multilink.json', 'w', encoding='utf-8') as f:
+            json.dump(movies_data, f, ensure_ascii=False, indent=4)
+        print(f"Successfully saved all {len(movies_data)} items to multilink.json")
+
+        status_message = f"SUCCESS: Scraped {len(movies_data)} items successfully at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         with open('status.txt', 'w', encoding='utf-8') as f:
             f.write(status_message)
 
@@ -216,6 +191,8 @@ def scrape_mlsbd():
         print(error_msg)
         with open('status.txt', 'w', encoding='utf-8') as f:
             f.write(error_msg)
+        with open('multilink.json', 'w', encoding='utf-8') as f:
+            json.dump([], f, ensure_ascii=False, indent=4)
 
 if __name__ == "__main__":
     scrape_mlsbd()
