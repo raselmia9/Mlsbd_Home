@@ -28,10 +28,9 @@ def scrape_mlsbd():
         soup = BeautifulSoup(response.text, 'html.parser')
         
         movies_data = []
-        seen_urls = set() # ডুপ্লিকেট চেক করার জন্য সেট (Set)
+        seen_urls = set()
         
-        # হোমপেজের সমস্ত পোস্ট বা কার্ডগুলো ট্র্যাক করার জন্য আরও ব্রড সিলেক্টর ব্যবহার করা হলো
-        # যাতে পেজে থাকা সবগুলো মুভি/পোস্টের কার্ড রিকগনাইজ করা যায়
+        # হোমপেজের সমস্ত পোস্ট বা কার্ডগুলো খুঁজে বের করা
         cards = soup.select('article, .item, .post-item, .card, .post')
         
         if not cards:
@@ -41,7 +40,7 @@ def scrape_mlsbd():
 
         for card in cards:
             try:
-                # লোগো বা ছবির লিংক খোঁজা (লেজি লোডিং এট্রিবিউটসহ)
+                # লোগো বা ছবির লিংক খোঁজা
                 img_tag = card.find('img')
                 img_url = ""
                 if img_tag:
@@ -52,46 +51,59 @@ def scrape_mlsbd():
                         img_tag.get('srcset')
                     )
                 
-                # দ্বিতীয় পেজে যাওয়ার লিংক খোঁজা
+                # দ্বিতীয় পেজে যাওয়ার লিংক এবং টাইটেল খোঁজা
                 link_tag = card.find('a', href=True)
                 detail_url = ""
                 title = ""
                 
                 if link_tag:
                     detail_url = link_tag['href']
-                    # সঠিক টাইটেল পাওয়ার জন্য হেডিং বা অ্যাংকরের টেক্সট খোঁজা
-                    title_tag = card.find(['h2', 'h3', 'h1', 'span'])
+                    
+                    # হোমপেজ বা রুট ইউআরএল হলে তা বাদ দেব
+                    if detail_url.rstrip('/') == BASE_URL.rstrip('/'):
+                        continue
+
+                    # সঠিক টাইটেল পাওয়ার জন্য হেডিং ট্যাগ বা অ্যাংকর ট্যাগের ভেতরের টেক্সট খোঁজা
+                    title_tag = card.find(['h2', 'h3', 'h1'])
                     if title_tag:
                         title = title_tag.get_text(strip=True)
-                    elif link_tag.get_text(strip=True):
-                        title = link_tag.get_text(strip=True)
+                    else:
+                        # যদি হেডিং না থাকে, তবে ইমেজের alt টেক্সট বা a ট্যাগের টেক্সট ট্রাই করব
+                        if img_tag and img_tag.get('alt'):
+                            title = img_tag.get('alt').strip()
+                        else:
+                            title = link_tag.get_text(strip=True)
 
-                # যদি লিংক এবং ইমেজ থাকে এবং এটি আগে কখনো সেভ করা না হয়ে থাকে (ডুপ্লিকেট চেক)
-                if detail_url and detail_url not in seen_urls:
+                # ইউনিক এবং ভ্যালিড লিংক চেক করা
+                if detail_url and detail_url.rstrip('/') != BASE_URL.rstrip('/') and detail_url not in seen_urls:
                     seen_urls.add(detail_url)
                     movies_data.append({
-                        "title": title if title else "No Title",
+                        "title": title if title and title != "No Title" else "Unknown Movie",
                         "logo_url": img_url if img_url else "",
                         "detail_url": detail_url
                     })
             except Exception as e:
                 continue
 
-        # যদি প্রধান সিলেক্টরগুলোতে সব কার্ড কাভার না করে, তবে ফলের পরিধি বাড়াতে অল্টারনেটিভ লুপ
+        # ব্যাকআপ লজিক (যদি কার্ডের মাধ্যমে সব না আসে)
         if len(movies_data) < 5:
             print("Expanding search to all anchor tags with images...")
             for a in soup.find_all('a', href=True):
+                detail_url = a['href']
+                
+                # হোমপেজ বাদ দেওয়া
+                if detail_url.rstrip('/') == BASE_URL.rstrip('/'):
+                    continue
+                    
                 img = a.find('img')
                 if img:
                     img_url = img.get('data-src') or img.get('src')
-                    detail_url = a['href']
                     title = img.get('alt') or a.get_text(strip=True)
                     
-                    # ইউনিক লিংক নিশ্চিত করা
                     if detail_url and detail_url not in seen_urls and ('mlsbd.co' in detail_url or detail_url.startswith('/')):
                         seen_urls.add(detail_url)
                         movies_data.append({
-                            "title": title if title else "No Title",
+                            "title": title if title else "Unknown Movie",
                             "logo_url": img_url if img_url else "",
                             "detail_url": detail_url
                         })
