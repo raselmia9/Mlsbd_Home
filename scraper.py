@@ -10,20 +10,6 @@ BASE_URL = "https://mlsbd.co/"
 BATCH_SIZE = 100      
 MAX_WORKERS = 20      
 
-# যে শিরোনাম বা কিওয়ার্ডগুলো আপনি লিস্টে রাখতে চান না, সেগুলো এখানে যুক্ত করতে পারেন
-EXCLUDED_KEYWORDS = [
-    'salahuddin ayyubi', 
-    'সালাউদ্দিন আইয়ুবী', 
-    'sultan salahuddin'
-]
-
-def should_exclude_title(title):
-    title_lower = title.lower()
-    for keyword in EXCLUDED_KEYWORDS:
-        if keyword in title_lower:
-            return True
-    return False
-
 def clean_title_from_url(url):
     try:
         path = url.strip('/').split('/')[-1]
@@ -43,7 +29,7 @@ def clean_episode_name(text):
 
 def is_valid_post_url(url):
     url_lower = url.lower()
-    invalid_keywords = ['/author/', '/category/', '/tag/', '/genre/', '/page/', 'mlsbd.co/contact', 'mlsbd.co/about']
+    invalid_keywords = ['/author/', '/category/', '/tag/', '/genre/', '/page/', 'mlsbd.co/contact', 'mlsbd.co/about', 'wp-content']
     for keyword in invalid_keywords:
         if keyword in url_lower:
             return False
@@ -172,7 +158,8 @@ def process_single_item(item):
 
 def extract_items_from_soup(soup, seen_urls):
     items = []
-    cards = soup.find_all(['article', 'div'], class_=lambda x: x and any(c in x.lower() for c in ['item', 'post', 'card', 'box']))
+    # ওয়েবসাইটের মূল পোস্ট ব্লকগুলো নিখুঁতভাবে ধরার জন্য সিলেক্টর ব্রড করা হলো যাতে প্রথম আইটেম সহ সব আসে
+    cards = soup.find_all(['article', 'div'], class_=lambda x: x and any(c in x.lower() for c in ['item', 'post', 'card', 'box', 'content']))
     
     for card in cards:
         link_tag = card.find('a', href=True)
@@ -186,11 +173,13 @@ def extract_items_from_soup(soup, seen_urls):
         if not is_valid_post_url(detail_url) or detail_url in seen_urls:
             continue
             
+        # ইমেজ বা লোগো সংগ্রহ
         img_tag = card.find('img')
         img_url = ""
         if img_tag:
             img_url = img_tag.get('data-src') or img_tag.get('src') or img_tag.get('data-lazy-src') or img_tag.get('srcset')
         
+        # টাইটেল সংগ্রহ
         title_tag = card.find(['h2', 'h3', 'h1', 'span'], class_=lambda x: x and 'title' in x.lower())
         if not title_tag:
             title_tag = card.find(['h2', 'h3', 'h1'])
@@ -202,10 +191,7 @@ def extract_items_from_soup(soup, seen_urls):
         else:
             title = clean_title_from_url(detail_url)
 
-        # যদি টাইটেলে এক্সক্লুড করা শব্দ থাকে, তবে এটি স্কিপ করবে
-        if should_exclude_title(title):
-            continue
-
+        # কোনো আইটেম বাদ না দিয়ে সোজা যুক্ত করা হচ্ছে
         seen_urls.add(detail_url)
         items.append({
             "title": title,
@@ -230,7 +216,7 @@ def scrape_mlsbd():
         all_items_meta = extract_items_from_soup(soup, seen_urls)
         print(f"Initial items found on homepage: {len(all_items_meta)}")
 
-        # ১৫০০-১৬০০ আইটেম পাওয়ার জন্য পেজের সীমা বাড়িয়ে ৮০ পর্যন্ত রাখা হলো
+        # ১৫০০-১৬০০ আইটেম পাওয়ার জন্য পেজিনেশন লুপ (সর্বোচ্চ ৮০ পেজ পর্যন্ত)
         max_pages = 80
         for page_num in range(2, max_pages + 2):
             page_url = f"{BASE_URL}page/{page_num}/"
