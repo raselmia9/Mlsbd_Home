@@ -1,6 +1,7 @@
 import os
 import json
 import time
+import re
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import cloudscraper
@@ -9,6 +10,17 @@ from bs4 import BeautifulSoup
 BASE_URL = "https://mlsbd.co/"
 BATCH_SIZE = 100      
 MAX_WORKERS = 20      
+
+# ১৮+ বা অ্যাডাল্ট কন্টেন্ট চেনার জন্য কিওয়ার্ড লিস্ট
+ADULT_KEYWORDS = ['18+', '18-plus', '18 plus', '-18-', 'adult', 'erotic', 'ullu', 'kooku', 'primeshots', 'xprime', 'hot web series']
+
+def is_18_plus(title, url):
+    """টাইটেল বা ইউআরএল-এর মধ্যে ১৮+ কিওয়ার্ড আছে কিনা তা চেক করার ফাংশন"""
+    text_to_check = f"{title} {url}".lower()
+    for keyword in ADULT_KEYWORDS:
+        if keyword in text_to_check:
+            return True
+    return False
 
 def clean_title_from_url(url):
     try:
@@ -41,6 +53,7 @@ def scrape_detail_page_fast(scraper, detail_url):
     item_data = {
         "detail_url": detail_url,
         "type": "movie",
+        "date_time": "",
         "download_links": {}
     }
     
@@ -51,6 +64,21 @@ def scrape_detail_page_fast(scraper, detail_url):
             
         soup = BeautifulSoup(response.text, 'html.parser')
         
+        # ডিটেইল পেজ থেকে রিয়েল পাবলিশিং ডেট এবং টাইম সংগ্রহ করা
+        meta_tag = soup.find('meta', property='article:published_time')
+        if meta_tag and meta_tag.get('content'):
+            item_data["date_time"] = meta_tag['content']
+        else:
+            time_tag = soup.find('time', class_=lambda x: x and ('date' in x.lower() or 'published' in x.lower()))
+            if time_tag:
+                item_data["date_time"] = time_tag.get('datetime') or time_tag.get_text(strip=True)
+            else:
+                for t in soup.find_all('time'):
+                    if t.get('datetime'):
+                        item_data["date_time"] = t['datetime']
+                        break
+
+        # সিরিজ বা এপিসোড চেক করা
         text_nodes = soup.find_all(string=lambda t: t and ('epi' in t.lower() or 'episode' in t.lower()))
         
         seen_episodes = set()
@@ -137,7 +165,7 @@ def process_single_item(item):
                 "title": item['title'],
                 "logo_url": item['logo_url'],
                 "detail_url": item['detail_url'],
-                "date_time": item['date_time'],  # ডেট ও টাইম যুক্ত করা হলো
+                "date_time": detail_info["date_time"],  
                 "type": "series",
                 "episodes": detail_info["episodes"]
             }
@@ -148,7 +176,7 @@ def process_single_item(item):
                 "title": item['title'],
                 "logo_url": item['logo_url'],
                 "detail_url": item['detail_url'],
-                "date_time": item['date_time'],  # ডেট ও টাইম যুক্ত করা হলো
+                "date_time": detail_info["date_time"],  
                 "type": "movie",
                 "download_links": detail_info["download_links"]
             }
@@ -173,13 +201,11 @@ def extract_items_from_soup(soup, seen_urls, global_index_counter):
         if not is_valid_post_url(detail_url) or detail_url in seen_urls:
             continue
             
-        # ইমেজ বা লোগো সংগ্রহ
         img_tag = card.find('img')
         img_url = ""
         if img_tag:
             img_url = img_tag.get('data-src') or img_tag.get('src') or img_tag.get('data-lazy-src') or img_tag.get('srcset')
         
-        # টাইটেল সংগ্রহ
         title_tag = card.find(['h2', 'h3', 'h1', 'span'], class_=lambda x: x and 'title' in x.lower())
         if not title_tag:
             title_tag = card.find(['h2', 'h3', 'h1'])
@@ -191,27 +217,16 @@ def extract_items_from_soup(soup, seen_urls, global_index_counter):
         else:
             title = clean_title_from_url(detail_url)
 
-        # ডেট এবং টাইম বা পোস্টের সময় সংগ্রহ (যেমন: "24 hours ago" বা নির্দিষ্ট ডেট)
-        date_time_str = ""
-        # ওয়েবসাইটের কার্ডে সাধারণত time ট্যাগ বা ডেটের ক্লাস থাকে
-        time_tag = card.find(['span', 'time', 'div'], class_=lambda x: x and any(c in x.lower() for c in ['date', 'time', 'posted', 'ago']))
-        if time_tag:
-            date_time_str = time_tag.get_text(strip=True)
-        else:
-            # বিকল্প হিসেবে পুরো কার্ডের টেক্সট থেকে সময় খোঁজা
-            for span in card.find_all(['span', 'p']):
-                txt = span.get_text(strip=True)
-                if 'ago' in txt.lower() or '202' in txt or 'hour' in txt.lower() or 'day' in txt.lower():
-                    date_time_str = txt
-                    break
+        # ১৮+ কন্টেন্ট চেকিং (যদি ১৮+ হয়, তাহলে স্কিপ করবে)
+        if is_18_plus(title, detail_url):
+            continue
 
         seen_urls.add(detail_url)
         items.append({
             "original_index": global_index_counter[0],
             "title": title,
             "logo_url": img_url if img_url else "",
-            "detail_url": detail_url,
-            "date_time": date_time_str
+            "detail_url": detail_url
         })
         global_index_counter[0] += 1
         
@@ -225,7 +240,7 @@ def scrape_mlsbd():
     try:
         seen_urls = set()
         all_items_meta = []
-        global_index_counter = [0]  # সিকিয়েন্স বা সিরিয়াল ঠিক রাখার জন্য কাউন্টার
+        global_index_counter = [0]
 
         max_pages = 150
         for page_num in range(1, max_pages + 1):
@@ -278,14 +293,14 @@ def scrape_mlsbd():
                     if res:
                         processed_results.append(res)
 
-        # মূল ওয়েবসাইটের সিরিয়াল (লেটেস্ট থেকে পুরাতন) অনুযায়ী সাজানো
+        # ওয়েবসাইটের আসল সিরিয়াল (লেটেস্ট থেকে পুরাতন) অনুযায়ী সাজানো
         processed_results.sort(key=lambda x: x[0])
         movies_data = [item[1] for item in processed_results]
 
         with open('multilink.json', 'w', encoding='utf-8') as f:
             json.dump(movies_data, f, ensure_ascii=False, indent=4)
 
-        print(f"\nSuccessfully completed! All {len(movies_data)} items saved with correct serial and date_time to multilink.json")
+        print(f"\nSuccessfully completed! All {len(movies_data)} items saved with correct serial, real date_time, and 18+ items removed to multilink.json")
 
         status_message = f"SUCCESS: Scraped {len(movies_data)} items at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         with open('status.txt', 'w', encoding='utf-8') as f:
