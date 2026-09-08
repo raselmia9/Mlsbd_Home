@@ -7,8 +7,8 @@ import cloudscraper
 from bs4 import BeautifulSoup
 
 BASE_URL = "https://mlsbd.co/"
-BATCH_SIZE = 50       # প্রতিবারে ৫০টি করে আইটেম প্রসেস করার ব্যাচ
-MAX_WORKERS = 15      # কাজের গতি বাড়ানোর জন্য থ্রেড সংখ্যা বাড়িয়ে ১৫ করা হলো
+BATCH_SIZE = 50       
+MAX_WORKERS = 15      
 
 def clean_title_from_url(url):
     """ইউআরএল থেকে সুন্দর একটি টাইটেল তৈরি করার ফাংশন"""
@@ -29,6 +29,17 @@ def clean_episode_name(text):
     cleaned = cleaned.lstrip("-: ").strip()
     return cleaned if cleaned else text
 
+def is_valid_post_url(url):
+    """অথর, ক্যাটাগরি বা অন্যান্য অপ্রয়োজনীয় পেজ বাদ দিয়ে শুধু মুভি/সিরিজের লিংক ফিল্টার করার ফাংশন"""
+    url_lower = url.lower()
+    invalid_keywords = ['/author/', '/category/', '/tag/', '/genre/', '/page/', 'mlsbd.co/contact', 'mlsbd.co/about']
+    for keyword in invalid_keywords:
+        if keyword in url_lower:
+            return False
+    if url_lower.rstrip('/') == BASE_URL.rstrip('/'):
+        return False
+    return True
+
 def extract_target_download_links(scraper, quality_url):
     """ইন্টারমিডিয়েট পেজ ভিজিট করে নির্দিষ্ট ডোমেইনের লিংকগুলো কালেক্ট করবে"""
     target_links = []
@@ -46,14 +57,12 @@ def extract_target_download_links(scraper, quality_url):
     return target_links
 
 def process_single_quality(scraper, q_name, q_href):
-    """একটি নির্দিষ্ট কোয়ালিটির লিংক রেজলভ করার হেল্পার ফাংশন"""
     target_links = extract_target_download_links(scraper, q_href)
     if target_links:
         return q_name, target_links
     return None
 
 def scrape_detail_page(scraper, detail_url):
-    """প্রতিটি ডিটেইল পেজে প্রবেশ করে এপিসোড বা কোয়ালিটি লিংক দ্রুত সংগ্রহ করবে"""
     item_data = {
         "detail_url": detail_url,
         "type": "movie",
@@ -67,7 +76,7 @@ def scrape_detail_page(scraper, detail_url):
             
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # সিরিজ বা মাল্টি-এপিসোড চেক করা
+        # সিরিজ বা এপিসোড চেক করা
         text_nodes = soup.find_all(string=lambda t: t and ('epi' in t.lower() or 'episode' in t.lower()))
         
         seen_episodes = set()
@@ -151,30 +160,40 @@ def scrape_detail_page(scraper, detail_url):
         return item_data
 
 def process_single_item(item):
-    """প্রতিটি আইটেম আলাদা থ্রেডে প্রসেস করার ফাংশন"""
     scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'linux', 'desktop': True})
     try:
-        print(f"Crawling: {item['title']}")
+        print(f"Checking & Crawling: {item['title']}")
         detail_info = scrape_detail_page(scraper, item['detail_url'])
         
-        item_entry = {
-            "title": item['title'],
-            "logo_url": item['logo_url'],
-            "detail_url": item['detail_url'],
-            "type": detail_info["type"]
-        }
-        
+        # যদি কোনো ডাউনলোড লিংক বা এপিসোড না থাকে, তবে আইটেমটি বাদ দেবো
         if detail_info["type"] == "series":
-            item_entry["episodes"] = detail_info["episodes"]
+            if not detail_info["episodes"]:
+                print(f"Skipped (No links found): {item['title']}")
+                return None
+            item_entry = {
+                "title": item['title'],
+                "logo_url": item['logo_url'],
+                "detail_url": item['detail_url'],
+                "type": "series",
+                "episodes": detail_info["episodes"]
+            }
         else:
-            item_entry["download_links"] = detail_info["download_links"]
+            if not detail_info["download_links"]:
+                print(f"Skipped (No links found): {item['title']}")
+                return None
+            item_entry = {
+                "title": item['title'],
+                "logo_url": item['logo_url'],
+                "detail_url": item['detail_url'],
+                "type": "movie",
+                "download_links": detail_info["download_links"]
+            }
             
         return item_entry
     except Exception as e:
         return None
 
 def extract_items_from_soup(soup, seen_urls):
-    """সুপ অবজেক্ট থেকে আইটেমগুলো এক্সট্রাক্ট করার হেল্পার ফাংশন"""
     items = []
     cards = soup.find_all(['article', 'div'], class_=lambda x: x and any(c in x.lower() for c in ['item', 'post', 'card', 'box']))
     
@@ -187,7 +206,8 @@ def extract_items_from_soup(soup, seen_urls):
         if not detail_url.startswith('http'):
             continue
             
-        if detail_url.rstrip('/') == BASE_URL.rstrip('/') or detail_url in seen_urls:
+        # ভ্যালিড পোস্ট ইউআরএল চেক করা (অথর বা ক্যাটাগরি বাদ দেওয়া)
+        if not is_valid_post_url(detail_url) or detail_url in seen_urls:
             continue
             
         seen_urls.add(detail_url)
@@ -229,64 +249,42 @@ def scrape_mlsbd():
         
         seen_urls = set()
         all_items_meta = extract_items_from_soup(soup, seen_urls)
-        print(f"Initial items found on homepage: {len(all_items_meta)}")
+        print(f"Initial valid movie/series items found on homepage: {len(all_items_meta)}")
 
-        # "MORE" বাটনের মাধ্যমে ২০-২৫ বার বা যতদূর লোড করা যায় ডেটা ফেচ করা
-        more_button = soup.find(string=lambda t: t and 'more' in t.lower())
-        load_more_url = None
-        
-        if more_button:
-            parent_a = more_button.find_parent('a', href=True)
-            if parent_a:
-                load_more_url = parent_a['href']
-
-        # যদি সরাসরি লিংক না পাওয়া যায়, তবে সাধারণ পেজিনেশন প্যাটার্ন চেক করা
-        max_clicks = 25  # আপনার চাওয়া অনুযায়ী ২০-২৫ বার ক্লিক বা রিকোয়েস্ট পাঠানো
-        for click_count in range(1, max_clicks + 1):
-            if not load_more_url:
-                # যদি পেজ ভিত্তিক পেজিনেশন হয় (যেমন /page/2/, /page/3/)
-                load_more_url = f"{BASE_URL}page/{click_count + 1}/"
-            
-            print(f"Fetching more items, batch/page {click_count}...")
+        # পেজিনেশনের মাধ্যমে আরও আইটেম লোড করা (যেমন ২০-২৫ পেজ)
+        max_pages = 25
+        for page_num in range(2, max_pages + 2):
+            page_url = f"{BASE_URL}page/{page_num}/"
+            print(f"Fetching page {page_num}: {page_url}")
             try:
-                more_resp = scraper.get(load_more_url, timeout=15)
-                if more_resp.status_code != 200:
+                page_resp = scraper.get(page_url, timeout=15)
+                if page_resp.status_code != 200:
+                    print("Reached end of pages or page not found.")
                     break
                 
-                more_soup = BeautifulSoup(more_resp.text, 'html.parser')
-                new_items = extract_items_from_soup(more_soup, seen_urls)
+                page_soup = BeautifulSoup(page_resp.text, 'html.parser')
+                new_items = extract_items_from_soup(page_soup, seen_urls)
                 
                 if not new_items:
-                    print("No more items found. Stopping pagination.")
+                    print("No more items found on this page.")
                     break
                     
                 all_items_meta.extend(new_items)
-                print(f"Total items collected so far: {len(all_items_meta)}")
-                
-                # পরবর্তী পেজের লিংক খোঁজা
-                next_a = more_soup.find('a', class_=lambda x: x and 'next' in x.lower()) or more_soup.find(string=lambda t: t and 'more' in t.lower())
-                if next_a and hasattr(next_a, 'find_parent'):
-                    p_a = next_a.find_parent('a', href=True)
-                    if p_a:
-                        load_more_url = p_a['href']
-                else:
-                    load_more_url = f"{BASE_URL}page/{click_count + 2}/"
-                    
-                time.sleep(0.5)
+                print(f"Total valid items collected so far: {len(all_items_meta)}")
+                time.sleep(0.3)
             except Exception as e:
                 print(f"Pagination finished or error: {e}")
                 break
 
         total_items = len(all_items_meta)
-        print(f"Total valid items collected after pagination: {total_items}. Starting multi-threaded processing...")
+        print(f"\nTotal valid items to process: {total_items}. Starting multi-threaded processing...")
 
         movies_data = []
         
-        # ব্যাচ বাই ব্যাচ মাল্টিথ্রেডিং প্রসেসিং
         for i in range(0, total_items, BATCH_SIZE):
             batch = all_items_meta[i:i + BATCH_SIZE]
             batch_num = (i // BATCH_SIZE) + 1
-            print(f"\n--- Processing Batch {batch_num} (Items {i+1} to {min(i + BATCH_SIZE, total_items)}) concurrently ---")
+            print(f"\n--- Processing Batch {batch_num} (Items {i+1} to {min(i + BATCH_SIZE, total_items)}) ---")
             
             with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
                 futures = {executor.submit(process_single_item, item): item for item in batch}
@@ -298,11 +296,11 @@ def scrape_mlsbd():
             
             with open('multilink.json', 'w', encoding='utf-8') as f:
                 json.dump(movies_data, f, ensure_ascii=False, indent=4)
-            print(f"Batch {batch_num} saved successfully.")
+            print(f"Batch {batch_num} saved successfully. Total saved so far: {len(movies_data)}")
 
         print(f"\nSuccessfully completed! All {len(movies_data)} items saved to multilink.json")
 
-        status_message = f"SUCCESS: Scraped {len(movies_data)} items with pagination at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        status_message = f"SUCCESS: Scraped {len(movies_data)} items at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         with open('status.txt', 'w', encoding='utf-8') as f:
             f.write(status_message)
 
