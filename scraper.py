@@ -7,8 +7,8 @@ import cloudscraper
 from bs4 import BeautifulSoup
 
 BASE_URL = "https://mlsbd.co/"
-BATCH_SIZE = 100      # একসাথে বড় ব্যাচ
-MAX_WORKERS = 20      # দ্রুত কাজ শেষ করার জন্য থ্রেড বাড়িয়ে ২০ করা হলো
+BATCH_SIZE = 100      
+MAX_WORKERS = 20      
 
 def clean_title_from_url(url):
     try:
@@ -39,7 +39,7 @@ def is_valid_post_url(url):
 
 def scrape_detail_page_fast(scraper, detail_url):
     """
-    খুব দ্রুত ডিটেইল পেজ পার্স করে শুধু লিংক এবং কোয়ালিটি সংগ্রহ করবে (ইন্টারমিডিয়েট পেজ ভিজিট ছাড়া)
+    ডিটেইল পেজ থেকে প্রতিটি কোয়ালিটির জন্য একটি মাত্র সঠিক লিংক সংগ্রহ করবে।
     """
     item_data = {
         "detail_url": detail_url,
@@ -81,11 +81,9 @@ def scrape_detail_page_fast(scraper, detail_url):
                                 continue
                                 
                             for q in ['360p', '480p', '720p', '1080p', 'watch online']:
-                                if q in link_text:
-                                    if q not in qualities_map:
-                                        qualities_map[q] = []
-                                    if link_href not in qualities_map[q]:
-                                        qualities_map[q].append(link_href)
+                                # যদি কোয়ালিটি মিলে এবং সেই কোয়ালিটির লিংক আগে থেকে সেভ করা না থাকে (প্রতিটিতে একটি মাত্র লিংক)
+                                if q in link_text and q not in qualities_map:
+                                    qualities_map[q] = link_href
                                     break
 
                     if qualities_map:
@@ -108,11 +106,8 @@ def scrape_detail_page_fast(scraper, detail_url):
                     continue
                 
                 for q in ['360p', '480p', '720p', '1080p', 'watch online']:
-                    if q in text:
-                        if q not in qualities_map:
-                            qualities_map[q] = []
-                        if href not in qualities_map[q]:
-                            qualities_map[q].append(href)
+                    if q in text and q not in qualities_map:
+                        qualities_map[q] = href
                         break
             
             item_data["type"] = "movie"
@@ -195,7 +190,7 @@ def extract_items_from_soup(soup, seen_urls):
     return items
 
 def scrape_mlsbd():
-    print(f"Super-fast scraping started at: {datetime.now()}")
+    print(f"Scraping started at: {datetime.now()}")
     
     scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'linux', 'desktop': True})
     
@@ -208,15 +203,16 @@ def scrape_mlsbd():
         
         seen_urls = set()
         all_items_meta = extract_items_from_soup(soup, seen_urls)
-        print(f"Initial valid items found on homepage: {len(all_items_meta)}")
+        print(f"Initial items found on homepage: {len(all_items_meta)}")
 
-        # পেজিনেশনের মাধ্যমে দ্রুত আইটেম সংগ্রহ (২৫ পেজ পর্যন্ত)
-        max_pages = 25
+        # ১৫০০-১৬০০ আইটেম পাওয়ার জন্য পেজের সীমা বাড়িয়ে প্রায় ৭০-৮০ পেজ পর্যন্ত করা হলো
+        max_pages = 80
         for page_num in range(2, max_pages + 2):
             page_url = f"{BASE_URL}page/{page_num}/"
             try:
                 page_resp = scraper.get(page_url, timeout=10)
                 if page_resp.status_code != 200:
+                    print("Reached end of pages.")
                     break
                 
                 page_soup = BeautifulSoup(page_resp.text, 'html.parser')
@@ -226,7 +222,11 @@ def scrape_mlsbd():
                     break
                     
                 all_items_meta.extend(new_items)
-                print(f"Collected total items metadata: {len(all_items_meta)}")
+                print(f"Total collected items metadata: {len(all_items_meta)}")
+                
+                # যদি ১৫০০ বা এর বেশি আইটেম হয়ে যায় তবে লুপ থামিয়ে দিতে পারি
+                if len(all_items_meta) >= 1600:
+                    break
             except:
                 break
 
@@ -251,7 +251,7 @@ def scrape_mlsbd():
             with open('multilink.json', 'w', encoding='utf-8') as f:
                 json.dump(movies_data, f, ensure_ascii=False, indent=4)
 
-        print(f"\nSuccessfully completed! All {len(movies_data)} items saved to multilink.json within minutes.")
+        print(f"\nSuccessfully completed! All {len(movies_data)} items saved to multilink.json")
 
         status_message = f"SUCCESS: Scraped {len(movies_data)} items at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         with open('status.txt', 'w', encoding='utf-8') as f:
@@ -265,3 +265,4 @@ def scrape_mlsbd():
 
 if __name__ == "__main__":
     scrape_mlsbd()
+
