@@ -8,14 +8,18 @@ import cloudscraper
 from bs4 import BeautifulSoup
 
 BASE_URL = "https://mlsbd.co/"
+
+# পেজ রেঞ্জ কনফিগারেশন (আপনার ইচ্ছেমতো ভাগ করে দিতে পারেন)
+START_PAGE = 1      # যেমন: প্রথম ধাপের জন্য ১
+END_PAGE = 200      # যেমন: প্রথম ধাপের শেষ পেজ ২০০ (পরের ধাপে ২০ কাজেই ২০১ থেকে ৫০০ দিতে পারেন)
+
 BATCH_SIZE = 100      
-MAX_WORKERS = 20      
+MAX_WORKERS = 25      # গতি বাড়ানোর জন্য ওয়ার্কার সংখ্যা বাড়িয়ে ২৫ করা হলো
 
 # ১৮+ বা অ্যাডাল্ট কন্টেন্ট চেনার জন্য কিওয়ার্ড লিস্ট
 ADULT_KEYWORDS = ['18+', '18-plus', '18 plus', '-18-', 'adult', 'erotic', 'ullu', 'kooku', 'primeshots', 'xprime', 'hot web series']
 
 def is_18_plus(title, url):
-    """টাইটেল বা ইউআরএল-এর মধ্যে ১৮+ কিওয়ার্ড আছে কিনা তা চেক করার ফাংশন"""
     text_to_check = f"{title} {url}".lower()
     for keyword in ADULT_KEYWORDS:
         if keyword in text_to_check:
@@ -78,7 +82,7 @@ def scrape_detail_page_fast(scraper, detail_url):
                         item_data["date_time"] = t['datetime']
                         break
 
-        # সিরিজ বা এপিসোড চেক করা
+        # সিরিজ বা এপিসোড চেক করা (প্যারালাল ডিটেইল প্রসেসিং)
         text_nodes = soup.find_all(string=lambda t: t and ('epi' in t.lower() or 'episode' in t.lower()))
         
         seen_episodes = set()
@@ -217,7 +221,7 @@ def extract_items_from_soup(soup, seen_urls, global_index_counter):
         else:
             title = clean_title_from_url(detail_url)
 
-        # ১৮+ কন্টেন্ট চেকিং (যদি ১৮+ হয়, তাহলে স্কিপ করবে)
+        # প্রথম ধাপেই ১৮+ কন্টেন্ট স্কিপ করা
         if is_18_plus(title, detail_url):
             continue
 
@@ -233,7 +237,7 @@ def extract_items_from_soup(soup, seen_urls, global_index_counter):
     return items
 
 def scrape_mlsbd():
-    print(f"Scraping started at: {datetime.now()}")
+    print(f"Scraping started for pages {START_PAGE} to {END_PAGE} at: {datetime.now()}")
     
     scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'linux', 'desktop': True})
     
@@ -242,8 +246,7 @@ def scrape_mlsbd():
         all_items_meta = []
         global_index_counter = [0]
 
-        max_pages = 150
-        for page_num in range(1, max_pages + 1):
+        for page_num in range(START_PAGE, END_PAGE + 1):
             if page_num == 1:
                 page_url = BASE_URL
             else:
@@ -253,30 +256,24 @@ def scrape_mlsbd():
             try:
                 response = scraper.get(page_url, timeout=12)
                 if response.status_code != 200:
-                    print(f"Page {page_num} returned status {response.status_code}.")
-                    if page_num > 10:
-                        break
-                    continue
+                    print(f"Page {page_num} returned status {response.status_code}. Ending range.")
+                    break
                 
                 soup = BeautifulSoup(response.text, 'html.parser')
                 new_items = extract_items_from_soup(soup, seen_urls, global_index_counter)
                 
                 if not new_items:
-                    print(f"No new items on page {page_num}.")
-                    if page_num > 5:
-                        break
+                    print(f"No more items found on page {page_num}.")
+                    break
                 else:
                     all_items_meta.extend(new_items)
                     print(f"Total collected items metadata so far: {len(all_items_meta)}")
-                
-                if len(all_items_meta) >= 1600:
-                    break
             except Exception as e:
                 print(f"Error on page {page_num}: {str(e)}")
                 continue
 
         total_items = len(all_items_meta)
-        print(f"\nTotal items to process: {total_items}. Running multi-threaded execution...")
+        print(f"\nTotal items to process in this range: {total_items}. Running parallel multi-threaded execution...")
 
         processed_results = []
         
@@ -293,16 +290,18 @@ def scrape_mlsbd():
                     if res:
                         processed_results.append(res)
 
-        # ওয়েবসাইটের আসল সিরিয়াল (লেটেস্ট থেকে পুরাতন) অনুযায়ী সাজানো
+        # সিরিয়াল ঠিক রাখা
         processed_results.sort(key=lambda x: x[0])
         movies_data = [item[1] for item in processed_results]
 
-        with open('multilink.json', 'w', encoding='utf-8') as f:
+        # ফাইলের নাম রেঞ্জ অনুযায়ী সেভ করা যেতে পারে, যেমন multilink_1_200.json
+        output_filename = f"multilink_{START_PAGE}_{END_PAGE}.json"
+        with open(output_filename, 'w', encoding='utf-8') as f:
             json.dump(movies_data, f, ensure_ascii=False, indent=4)
 
-        print(f"\nSuccessfully completed! All {len(movies_data)} items saved with correct serial, real date_time, and 18+ items removed to multilink.json")
+        print(f"\nSuccessfully completed! Saved {len(movies_data)} items to {output_filename}")
 
-        status_message = f"SUCCESS: Scraped {len(movies_data)} items at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        status_message = f"SUCCESS: Scraped {len(movies_data)} items (Pages {START_PAGE}-{END_PAGE}) at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         with open('status.txt', 'w', encoding='utf-8') as f:
             f.write(status_message)
 
