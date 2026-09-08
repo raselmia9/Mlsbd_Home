@@ -15,6 +15,18 @@ def clean_title_from_url(url):
     except:
         return "Unknown Title"
 
+def clean_episode_name(text):
+    """এপিসোড নাম থেকে 'Download Now' বা অতিরিক্ত অংশ রিমুভ করার ফাংশন"""
+    if not text:
+        return ""
+    cleaned = text.strip()
+    # যদি লেখাটি 'download now' দিয়ে শুরু হয়, তবে তা রিমুভ করে দেব
+    if cleaned.lower().startswith("download now"):
+        cleaned = cleaned[12:].strip() # 'download now' এর দৈর্ঘ্য ১২
+    # অতিরিক্ত হাইফন বা কোলন থাকলে তা পরিষ্কার করা
+    cleaned = cleaned.lstrip("-: ").strip()
+    return cleaned if cleaned else text
+
 def scrape_detail_page(scraper, detail_url):
     """প্রতিটি ডিটেইল পেজে প্রবেশ করে এপিসোড বা কোয়ালিটি লিংক সংগ্রহ করবে"""
     item_data = {
@@ -25,50 +37,33 @@ def scrape_detail_page(scraper, detail_url):
     }
     
     try:
-        response = scraper.get(detail_url, timeout=30)
+        response = scraper.get(detail_url, timeout=20)
         if response.status_code != 200:
-            return None
+            return item_data
             
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # ১. চেক করা পেজটি সিরিজ বা মাল্টি-এপিসোড কি না
-        # সাধারণত এপিসোডের বাটনগুলোতে 'Epi', 'Episode', বা 'Season' থাকে
-        episode_blocks = []
+        # টেক্সট নোড বা বাটনগুলো থেকে এপিসোড খোঁজা
+        text_nodes = soup.find_all(string=lambda t: t and ('epi' in t.lower() or 'episode' in t.lower()))
         
-        # পেজের সমস্ত হেডিং বা সেকশন দেখা যাক যেখানে এপিসোড থাকতে পারে
-        potential_headers = soup.find_all(['h2', 'h3', 'h4', 'strong', 'a', 'div'], string=lambda t: t and any(k in t.lower() for k in ['epi', 'episode', 'season', 'part']))
-        
-        # অথবা রেড বাটন বা ডাউনলোড সেকশনগুলো ট্র্যাক করা
-        download_headers = soup.find_all(string=lambda t: t and ('download now' in t.lower() or 'epi' in t.lower()))
-        
-        # যদি একাধিক এপিসোড বাটন বা হেডার পাওয়া যায়
-        if len(download_headers) > 1 or any('epi' in h.get_text().lower() for h in soup.find_all(['a', 'h3', 'h4', 'span'], string=True) if h.get_text()):
-            item_data["type"] = "series"
+        seen_episodes = set()
+        for node in text_nodes:
+            parent = node.parent
+            raw_ep_text = node.strip()
             
-            # পেজে থাকা প্রতিটি এপিসোডের ব্লক বা সেকশন খোঁজা
-            # সাধারণত প্রতিটি এপিসোডের জন্য আলাদা কন্টেইনার বা ডাউনলোড বাটন থাকে
-            # আমরা পেজের টেক্সট বা ব্লক অ্যানালাইজ করে এপিসোড আলাদা করব
-            
-            # একটি স্মার্ট এপ্রোচ: পেজে যতগুলো 'Download Now Epi...' বা অনুরূপ টেক্সট আছে সেগুলোকে ধরে লুপ চালানো
-            text_nodes = soup.find_all(string=lambda t: t and ('epi' in t.lower() or 'episode' in t.lower()))
-            
-            seen_episodes = set()
-            for node in text_nodes:
-                parent = node.parent
-                ep_text = node.strip()
-                if len(ep_text) < 30 and ep_text not in seen_episodes:
+            if len(raw_ep_text) < 40 and ('epi' in raw_ep_text.lower() or 'episode' in raw_ep_text.lower()):
+                ep_text = clean_episode_name(raw_ep_text)
+                
+                if ep_text and ep_text not in seen_episodes:
                     seen_episodes.add(ep_text)
                     
-                    # এই এপিসোডের আন্ডারে থাকা লিংকগুলো খোঁজার চেষ্টা
                     ep_links = {}
-                    # প্যারেন্টের পরবর্তী এলিমেন্ট বা তার ভেতরের লিংকগুলো স্ক্যান করা
-                    container = parent.find_parent(['div', 'section', 'p'])
+                    container = parent.find_parent(['div', 'section', 'p', 'tr'])
                     if container:
                         for a_tag in container.find_all('a', href=True):
                             link_text = a_tag.get_text(strip=True).lower()
                             link_href = a_tag['href']
                             
-                            # কোয়ালিটি ডিটেকশন
                             for q in ['360p', '480p', '720p', '1080p', '4k', 'watch online']:
                                 if q in link_text:
                                     ep_links[q] = link_href
@@ -77,22 +72,21 @@ def scrape_detail_page(scraper, detail_url):
                                 if 'watch' in link_text or 'online' in link_text:
                                     ep_links['watch_online'] = link_href
 
-                    item_data["episodes"].append({
-                        "episode_name": ep_text,
-                        "qualities": ep_links
-                    })
-        
-        # যদি সিরিজ না হয়ে সাধারণ মুভি হয়
-        if item_data["type"] == "movie" or not item_data["episodes"]:
-            item_data["type"] = "movie"
+                    if ep_links: # যদি এই এপিসোডের কোনো লিংক পাওয়া যায়
+                        item_data["episodes"].append({
+                            "episode_name": ep_text,
+                            "qualities": ep_links
+                        })
+
+        if item_data["episodes"]:
+            item_data["type"] = "series"
+        else:
+            # যদি সিরিজ না হয়ে সাধারণ মুভি হয়
             qualities_dict = {}
-            
-            # পেজের সব ডাউনলোড লিংক স্ক্যান করা
             for a_tag in soup.find_all('a', href=True):
                 text = a_tag.get_text(strip=True).lower()
                 href = a_tag['href']
                 
-                # ফ্লেক্সিবল কোয়ালিটি ম্যাচিং (360p থেকে 4K বা অনলাইন ওয়াচ)
                 for q in ['360p', '480p', '720p', '1080p', '4k', 'watch online']:
                     if q in text:
                         qualities_dict[q] = href
@@ -107,10 +101,10 @@ def scrape_detail_page(scraper, detail_url):
 
     except Exception as e:
         print(f"Error scraping detail page {detail_url}: {e}")
-        return None
+        return item_data
 
 def scrape_mlsbd():
-    print(f"Phase 2 Scraping started at: {datetime.now()}")
+    print(f"Scraping started at: {datetime.now()}")
     
     scraper = cloudscraper.create_scraper(
         browser={
@@ -134,9 +128,9 @@ def scrape_mlsbd():
         if not cards:
             cards = soup.find_all('div', class_=lambda x: x and ('post' in x or 'item' in x or 'card' in x))
 
-        print(f"Found {len(cards)} items on homepage. Starting deep crawl...")
+        print(f"Found {len(cards)} items on homepage. Processing all...")
 
-        for card in cards:
+        for index, card in enumerate(cards):
             try:
                 img_tag = card.find('img')
                 img_url = ""
@@ -162,40 +156,41 @@ def scrape_mlsbd():
                 else:
                     title = clean_title_from_url(detail_url)
 
-                print(f"Crawling details for: {title}")
+                print(f"[{index+1}/{len(cards)}] Crawling: {title}")
                 
-                # ডিটেইল পেজ থেকে ভেতরের লিংক বা এপিসোড ফেচ করা
+                # ডিটেইল পেজ ক্রল করা
                 detail_info = scrape_detail_page(scraper, detail_url)
                 
                 item_entry = {
                     "title": title,
                     "logo_url": img_url if img_url else "",
                     "detail_url": detail_url,
-                    "type": detail_info["type"] if detail_info else "movie"
+                    "type": detail_info["type"]
                 }
                 
-                if detail_info and detail_info["type"] == "series":
+                if detail_info["type"] == "series":
                     item_entry["episodes"] = detail_info["episodes"]
                 else:
-                    item_entry["qualities"] = detail_info["qualities"] if detail_info else {}
+                    item_entry["qualities"] = detail_info["qualities"]
 
                 movies_data.append(item_entry)
 
             except Exception as e:
+                print(f"Skipping an item due to error: {e}")
                 continue
 
         # আউটপুট জেসন ফাইল সেভ করা
         with open('multilink.json', 'w', encoding='utf-8') as f:
             json.dump(movies_data, f, ensure_ascii=False, indent=4)
-        print(f"Successfully saved {len(movies_data)} items with deep details to multilink.json")
+        print(f"Successfully saved {len(movies_data)} items to multilink.json")
 
         # স্ট্যাটাস ফাইল তৈরি করা
-        status_message = f"SUCCESS: Phase 2 completed. Scraped {len(movies_data)} items at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        status_message = f"SUCCESS: Scraped {len(movies_data)} items successfully at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         with open('status.txt', 'w', encoding='utf-8') as f:
             f.write(status_message)
 
     except Exception as e:
-        error_msg = f"ERROR: Phase 2 failed. Details: {str(e)}"
+        error_msg = f"ERROR: Failed to scrape. Details: {str(e)}"
         print(error_msg)
         with open('status.txt', 'w', encoding='utf-8') as f:
             f.write(error_msg)
