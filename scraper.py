@@ -2,11 +2,13 @@ import os
 import json
 import time
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import cloudscraper
 from bs4 import BeautifulSoup
 
 BASE_URL = "https://mlsbd.co/"
-BATCH_SIZE = 50  # প্রতিবারে ৫০টি করে আইটেম প্রসেস করার লিমিট
+BATCH_SIZE = 50       # প্রতিবারে ৫০টি করে আইটেম
+MAX_WORKERS = 10      # একসাথে ১০টি থ্রেড বা ট্যাব সমান্তরালভাবে কাজ করবে
 
 def clean_title_from_url(url):
     """ইউআরএল থেকে সুন্দর একটি টাইটেল তৈরি করার ফাংশন"""
@@ -36,16 +38,22 @@ def extract_target_download_links(scraper, quality_url):
             soup = BeautifulSoup(response.text, 'html.parser')
             for a_tag in soup.find_all('a', href=True):
                 href = a_tag['href']
-                # কাঙ্ক্ষিত দুটি ডোমেইন ফিল্টার করা
                 if 'hubcloud.foo/video/' in href or 'new2.multicloudlinks.com' in href:
                     if href not in target_links:
                         target_links.append(href)
     except Exception as e:
-        print(f"Error resolving link {quality_url}: {e}")
+        pass
     return target_links
 
+def process_single_quality(scraper, q_name, q_href):
+    """একটি নির্দিষ্ট কোয়ালিটির লিংক রেজলভ করার হেল্পার ফাংশন"""
+    target_links = extract_target_download_links(scraper, q_href)
+    if target_links:
+        return q_name, target_links
+    return None
+
 def scrape_detail_page(scraper, detail_url):
-    """প্রতিটি ডিটেইল পেজে প্রবেশ করে এপিসোড বা কোয়ালিটি লিংক সংগ্রহ ও প্রসেস করবে"""
+    """প্রতিটি ডিটেইল পেজে প্রবেশ করে এপিসোড বা কোয়ালিটি লিংক মাল্টিথ্রেডিংয়ের মাধ্যমে দ্রুত সংগ্রহ করবে"""
     item_data = {
         "detail_url": detail_url,
         "type": "movie",
@@ -78,21 +86,29 @@ def scrape_detail_page(scraper, detail_url):
                     qualities_map = {}
                     container = parent.find_parent(['div', 'section', 'p', 'tr', 'li'])
                     if container:
+                        # প্রতিটি এপিসোডের কোয়ালিটি লিংকগুলো থ্রেডপুল দিয়ে একসঙ্গে ফেচ করা
+                        quality_tasks = []
                         for a_tag in container.find_all('a', href=True):
                             link_text = a_tag.get_text(strip=True).lower()
                             link_href = a_tag['href']
                             
-                            # 4K সম্পূর্ণ বাদ দেওয়া এবং অন্যান্য কোয়ালিটি ট্র্যাক করা
                             if '4k' in link_text or '4k' in link_href:
                                 continue
                                 
                             for q in ['360p', '480p', '720p', '1080p', 'watch online']:
                                 if q in link_text:
-                                    # রিডাইরেক্ট লিংক থেকে টার্গেট লিংকগুলো বের করা
-                                    target_links = extract_target_download_links(scraper, link_href)
-                                    if target_links:
-                                        qualities_map[q] = target_links
+                                    quality_tasks.append((q, link_href))
                                     break
+                        
+                        # মাল্টিথ্রেডিং ব্যবহার করে একই এপিসোডের সব রেজুলেশন একসঙ্গে ফেচ করা
+                        if quality_tasks:
+                            with ThreadPoolExecutor(max_workers=5) as q_executor:
+                                future_to_q = {q_executor.submit(process_single_quality, scraper, q_name, q_href): q_name for q_name, q_href in quality_tasks}
+                                for future in as_completed(future_to_q):
+                                    res = future.result()
+                                    if res:
+                                        q_name, t_links = res
+                                        qualities_map[q_name] = t_links
 
                     if qualities_map:
                         episodes_list.append({
@@ -103,11 +119,10 @@ def scrape_detail_page(scraper, detail_url):
         if episodes_list:
             item_data["type"] = "series"
             item_data["episodes"] = episodes_list
-            # সিরিজ হলে রুট লেভেলের download_links দরকার নেই
             item_data.pop("download_links", None)
         else:
-            # মুভির ক্ষেত্রে কোয়ালিটি লিংক প্রসেস করা
-            qualities_map = {}
+            # মুভির ক্ষেত্রে কোয়ালিটি লিংকগুলো মাল্টিথ্রেডিংয়ে প্রসেস করা
+            movie_quality_tasks = []
             for a_tag in soup.find_all('a', href=True):
                 text = a_tag.get_text(strip=True).lower()
                 href = a_tag['href']
@@ -117,10 +132,18 @@ def scrape_detail_page(scraper, detail_url):
                 
                 for q in ['360p', '480p', '720p', '1080p', 'watch online']:
                     if q in text:
-                        target_links = extract_target_download_links(scraper, href)
-                        if target_links:
-                            qualities_map[q] = target_links
+                        movie_quality_tasks.append((q, href))
                         break
+            
+            qualities_map = {}
+            if movie_quality_tasks:
+                with ThreadPoolExecutor(max_workers=5) as q_executor:
+                    future_to_q = {q_executor.submit(process_single_quality, scraper, q_name, q_href): q_name for q_name, q_href in movie_quality_tasks}
+                    for future in as_completed(future_to_q):
+                        res = future.result()
+                        if res:
+                            q_name, t_links = res
+                            qualities_map[q_name] = t_links
             
             item_data["type"] = "movie"
             item_data["download_links"] = qualities_map
@@ -131,19 +154,37 @@ def scrape_detail_page(scraper, detail_url):
         print(f"Error scraping detail page {detail_url}: {e}")
         return item_data
 
+def process_single_item(item):
+    """ব্যাচের প্রতিটি আইটেম আলাদা থ্রেডে প্রসেস করার ফাংশন"""
+    scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'linux', 'desktop': True})
+    try:
+        print(f"Crawling & Resolving: {item['title']}")
+        detail_info = scrape_detail_page(scraper, item['detail_url'])
+        
+        item_entry = {
+            "title": item['title'],
+            "logo_url": item['logo_url'],
+            "detail_url": item['detail_url'],
+            "type": detail_info["type"]
+        }
+        
+        if detail_info["type"] == "series":
+            item_entry["episodes"] = detail_info["episodes"]
+        else:
+            item_entry["download_links"] = detail_info["download_links"]
+            
+        return item_entry
+    except Exception as e:
+        print(f"Error on item {item['title']}: {e}")
+        return None
+
 def scrape_mlsbd():
     print(f"Scraping started at: {datetime.now()}")
     
-    scraper = cloudscraper.create_scraper(
-        browser={
-            'browser': 'chrome',
-            'platform': 'linux',
-            'desktop': True
-        }
-    )
+    base_scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'linux', 'desktop': True})
     
     try:
-        response = scraper.get(BASE_URL, timeout=30)
+        response = base_scraper.get(BASE_URL, timeout=30)
         if response.status_code != 200:
             raise Exception(f"Failed to fetch homepage, status code: {response.status_code}")
             
@@ -191,45 +232,32 @@ def scrape_mlsbd():
             })
 
         total_items = len(all_items_meta)
-        print(f"Total valid items found: {total_items}. Processing in batches of {BATCH_SIZE}...")
+        print(f"Total valid items found: {total_items}. Processing in batches of {BATCH_SIZE} with Multi-threading...")
 
         movies_data = []
         
+        # ব্যাচ বাই ব্যাচ মাল্টিথ্রেডিং প্রসেসিং
         for i in range(0, total_items, BATCH_SIZE):
             batch = all_items_meta[i:i + BATCH_SIZE]
             batch_num = (i // BATCH_SIZE) + 1
-            print(f"\n--- Processing Batch {batch_num} (Items {i+1} to {min(i + BATCH_SIZE, total_items)}) ---")
+            print(f"\n--- Processing Batch {batch_num} (Items {i+1} to {min(i + BATCH_SIZE, total_items)}) concurrently ---")
             
-            for index, item in enumerate(batch, start=i+1):
-                try:
-                    print(f"[{index}/{total_items}] Crawling & Resolving Links: {item['title']}")
-                    detail_info = scrape_detail_page(scraper, item['detail_url'])
-                    
-                    item_entry = {
-                        "title": item['title'],
-                        "logo_url": item['logo_url'],
-                        "detail_url": item['detail_url'],
-                        "type": detail_info["type"]
-                    }
-                    
-                    if detail_info["type"] == "series":
-                        item_entry["episodes"] = detail_info["episodes"]
-                    else:
-                        item_entry["download_links"] = detail_info["download_links"]
-
-                    movies_data.append(item_entry)
-                    time.sleep(0.5)
-                except Exception as e:
-                    print(f"Error on item {index}: {e}")
-                    continue
+            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+                futures = {executor.submit(process_single_item, item): item for item in batch}
+                
+                for future in as_completed(futures):
+                    result = future.result()
+                    if result:
+                        movies_data.append(result)
             
+            # প্রতি ব্যাচ শেষে সেভ করা
             with open('multilink.json', 'w', encoding='utf-8') as f:
                 json.dump(movies_data, f, ensure_ascii=False, indent=4)
             print(f"Batch {batch_num} saved successfully.")
 
         print(f"\nSuccessfully completed! All {len(movies_data)} items saved to multilink.json")
 
-        status_message = f"SUCCESS: Phase 3 completed. Scraped {len(movies_data)} items at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        status_message = f"SUCCESS: Multi-threaded Phase completed. Scraped {len(movies_data)} items at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         with open('status.txt', 'w', encoding='utf-8') as f:
             f.write(status_message)
 
