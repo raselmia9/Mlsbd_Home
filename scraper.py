@@ -7,25 +7,11 @@ import cloudscraper
 from bs4 import BeautifulSoup
 
 BASE_URL = "https://mlsbd.co/"
-
-# পেজ রেঞ্জ (আপনার প্রয়োজনমতো বাড়িয়ে নিতে পারেন)
-START_PAGE = 1      
-END_PAGE = 250      
-
-BATCH_SIZE = 300      
-MAX_WORKERS = 60      # স্পিড বহুগুণ বাড়িয়ে দেওয়ার জন্য ওয়ার্কার ৬০ করা হলো
-
-# ১৮+ বা অ্যাডাল্ট কন্টেন্ট চেনার জন্য কিওয়ার্ড লিস্ট
-ADULT_KEYWORDS = ['18+', '18-plus', '18 plus', '-18-', 'adult', 'erotic', 'ullu', 'kooku', 'primeshots', 'xprime', 'hot web series']
-
-def is_18_plus(title, url):
-    text_to_check = f"{title} {url}".lower()
-    for keyword in ADULT_KEYWORDS:
-        if keyword in text_to_check:
-            return True
-    return False
+BATCH_SIZE = 50       # প্রতিবারে ৫০টি করে আইটেম
+MAX_WORKERS = 10      # একসাথে ১০টি থ্রেড বা ট্যাব সমান্তরালভাবে কাজ করবে
 
 def clean_title_from_url(url):
+    """ইউআরএল থেকে সুন্দর একটি টাইটেল তৈরি করার ফাংশন"""
     try:
         path = url.strip('/').split('/')[-1]
         title = path.replace('-', ' ').title()
@@ -34,6 +20,7 @@ def clean_title_from_url(url):
         return "Unknown Title"
 
 def clean_episode_name(text):
+    """এপিসোড নাম থেকে 'Download Now' বা অতিরিক্ত অংশ রিমুভ করার ফাংশন"""
     if not text:
         return ""
     cleaned = text.strip()
@@ -42,47 +29,45 @@ def clean_episode_name(text):
     cleaned = cleaned.lstrip("-: ").strip()
     return cleaned if cleaned else text
 
-def is_valid_post_url(url):
-    url_lower = url.lower()
-    invalid_keywords = ['/author/', '/category/', '/tag/', '/genre/', '/page/', 'mlsbd.co/contact', 'mlsbd.co/about', 'wp-content']
-    for keyword in invalid_keywords:
-        if keyword in url_lower:
-            return False
-    if url_lower.rstrip('/') == BASE_URL.rstrip('/'):
-        return False
-    return True
+def extract_target_download_links(scraper, quality_url):
+    """ইন্টারমিডিয়েট পেজ ভিজিট করে নির্দিষ্ট ডোমেইনের লিংকগুলো কালেক্ট করবে"""
+    target_links = []
+    try:
+        response = scraper.get(quality_url, timeout=10)
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, 'html.parser')
+            for a_tag in soup.find_all('a', href=True):
+                href = a_tag['href']
+                if 'hubcloud.foo/video/' in href or 'new2.multicloudlinks.com' in href:
+                    if href not in target_links:
+                        target_links.append(href)
+    except Exception as e:
+        pass
+    return target_links
 
-def scrape_detail_page_fast(scraper, detail_url):
+def process_single_quality(scraper, q_name, q_href):
+    """একটি নির্দিষ্ট কোয়ালিটির লিংক রেজলভ করার হেল্পার ফাংশন"""
+    target_links = extract_target_download_links(scraper, q_href)
+    if target_links:
+        return q_name, target_links
+    return None
+
+def scrape_detail_page(scraper, detail_url):
+    """প্রতিটি ডিটেইল পেজে প্রবেশ করে এপিসোড বা কোয়ালিটি লিংক মাল্টিথ্রেডিংয়ের মাধ্যমে দ্রুত সংগ্রহ করবে"""
     item_data = {
         "detail_url": detail_url,
         "type": "movie",
-        "date_time": "",
         "download_links": {}
     }
     
     try:
-        # টাইমআউট কমিয়ে ৪ সেকেন্ড করা হয়েছে যাতে দ্রুত স্কিপ করে ফেইলড বা স্লো পেজগুলো
-        response = scraper.get(detail_url, timeout=4)
+        response = scraper.get(detail_url, timeout=15)
         if response.status_code != 200:
             return item_data
             
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # রিয়েল পাবলিশিং ডেট এবং টাইম সংগ্রহ
-        meta_tag = soup.find('meta', property='article:published_time')
-        if meta_tag and meta_tag.get('content'):
-            item_data["date_time"] = meta_tag['content']
-        else:
-            time_tag = soup.find('time', class_=lambda x: x and ('date' in x.lower() or 'published' in x.lower()))
-            if time_tag:
-                item_data["date_time"] = time_tag.get('datetime') or time_tag.get_text(strip=True)
-            else:
-                for t in soup.find_all('time'):
-                    if t.get('datetime'):
-                        item_data["date_time"] = t['datetime']
-                        break
-
-        # সিরিজ বা মুভি লিংক প্রসেসিং
+        # ১. সিরিজ বা মাল্টি-এপিসোড চেক করা
         text_nodes = soup.find_all(string=lambda t: t and ('epi' in t.lower() or 'episode' in t.lower()))
         
         seen_episodes = set()
@@ -101,23 +86,29 @@ def scrape_detail_page_fast(scraper, detail_url):
                     qualities_map = {}
                     container = parent.find_parent(['div', 'section', 'p', 'tr', 'li'])
                     if container:
+                        # প্রতিটি এপিসোডের কোয়ালিটি লিংকগুলো থ্রেডপুল দিয়ে একসঙ্গে ফেচ করা
+                        quality_tasks = []
                         for a_tag in container.find_all('a', href=True):
                             link_text = a_tag.get_text(strip=True).lower()
                             link_href = a_tag['href']
                             
                             if '4k' in link_text or '4k' in link_href:
                                 continue
-                            if '/category/' in link_href:
-                                continue
                                 
                             for q in ['360p', '480p', '720p', '1080p', 'watch online']:
-                                if q in link_text and q not in qualities_map:
-                                    qualities_map[q] = link_href
+                                if q in link_text:
+                                    quality_tasks.append((q, link_href))
                                     break
-
-                    has_resolution = any(q in qualities_map for q in ['360p', '480p', '720p', '1080p'])
-                    if has_resolution and 'watch online' in qualities_map:
-                        del qualities_map['watch online']
+                        
+                        # মাল্টিথ্রেডিং ব্যবহার করে একই এপিসোডের সব রেজুলেশন একসঙ্গে ফেচ করা
+                        if quality_tasks:
+                            with ThreadPoolExecutor(max_workers=5) as q_executor:
+                                future_to_q = {q_executor.submit(process_single_quality, scraper, q_name, q_href): q_name for q_name, q_href in quality_tasks}
+                                for future in as_completed(future_to_q):
+                                    res = future.result()
+                                    if res:
+                                        q_name, t_links = res
+                                        qualities_map[q_name] = t_links
 
                     if qualities_map:
                         episodes_list.append({
@@ -130,24 +121,29 @@ def scrape_detail_page_fast(scraper, detail_url):
             item_data["episodes"] = episodes_list
             item_data.pop("download_links", None)
         else:
-            qualities_map = {}
+            # মুভির ক্ষেত্রে কোয়ালিটি লিংকগুলো মাল্টিথ্রেডিংয়ে প্রসেস করা
+            movie_quality_tasks = []
             for a_tag in soup.find_all('a', href=True):
                 text = a_tag.get_text(strip=True).lower()
                 href = a_tag['href']
                 
                 if '4k' in text or '4k' in href:
                     continue
-                if '/category/' in href:
-                    continue
                 
                 for q in ['360p', '480p', '720p', '1080p', 'watch online']:
-                    if q in text and q not in qualities_map:
-                        qualities_map[q] = href
+                    if q in text:
+                        movie_quality_tasks.append((q, href))
                         break
             
-            has_resolution = any(q in qualities_map for q in ['360p', '480p', '720p', '1080p'])
-            if has_resolution and 'watch online' in qualities_map:
-                del qualities_map['watch online']
+            qualities_map = {}
+            if movie_quality_tasks:
+                with ThreadPoolExecutor(max_workers=5) as q_executor:
+                    future_to_q = {q_executor.submit(process_single_quality, scraper, q_name, q_href): q_name for q_name, q_href in movie_quality_tasks}
+                    for future in as_completed(future_to_q):
+                        res = future.result()
+                        if res:
+                            q_name, t_links = res
+                            qualities_map[q_name] = t_links
             
             item_data["type"] = "movie"
             item_data["download_links"] = qualities_map
@@ -155,144 +151,113 @@ def scrape_detail_page_fast(scraper, detail_url):
         return item_data
 
     except Exception as e:
+        print(f"Error scraping detail page {detail_url}: {e}")
         return item_data
 
 def process_single_item(item):
+    """ব্যাচের প্রতিটি আইটেম আলাদা থ্রেডে প্রসেস করার ফাংশন"""
     scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'linux', 'desktop': True})
     try:
-        detail_info = scrape_detail_page_fast(scraper, item['detail_url'])
+        print(f"Crawling & Resolving: {item['title']}")
+        detail_info = scrape_detail_page(scraper, item['detail_url'])
+        
+        item_entry = {
+            "title": item['title'],
+            "logo_url": item['logo_url'],
+            "detail_url": item['detail_url'],
+            "type": detail_info["type"]
+        }
         
         if detail_info["type"] == "series":
-            if not detail_info["episodes"]:
-                return None
-            item_entry = {
-                "title": item['title'],
-                "logo_url": item['logo_url'],
-                "detail_url": item['detail_url'],
-                "date_time": detail_info["date_time"],  
-                "type": "series",
-                "episodes": detail_info["episodes"]
-            }
+            item_entry["episodes"] = detail_info["episodes"]
         else:
-            if not detail_info["download_links"]:
-                return None
-            item_entry = {
-                "title": item['title'],
-                "logo_url": item['logo_url'],
-                "detail_url": item['detail_url'],
-                "date_time": detail_info["date_time"],  
-                "type": "movie",
-                "download_links": detail_info["download_links"]
-            }
+            item_entry["download_links"] = detail_info["download_links"]
             
-        return (item['original_index'], item_entry)
+        return item_entry
     except Exception as e:
+        print(f"Error on item {item['title']}: {e}")
         return None
 
-def extract_items_from_soup(soup, seen_urls, global_index_counter):
-    items = []
-    cards = soup.find_all(['article', 'div'], class_=lambda x: x and any(c in x.lower() for c in ['item', 'post', 'card', 'box', 'content']))
-    
-    for card in cards:
-        link_tag = card.find('a', href=True)
-        if not link_tag:
-            continue
-            
-        detail_url = link_tag['href']
-        if not detail_url.startswith('http'):
-            continue
-            
-        if not is_valid_post_url(detail_url) or detail_url in seen_urls:
-            continue
-            
-        img_tag = card.find('img')
-        img_url = ""
-        if img_tag:
-            img_url = img_tag.get('data-src') or img_tag.get('src') or img_tag.get('data-lazy-src') or img_tag.get('srcset')
-        
-        title_tag = card.find(['h2', 'h3', 'h1', 'span'], class_=lambda x: x and 'title' in x.lower())
-        if not title_tag:
-            title_tag = card.find(['h2', 'h3', 'h1'])
-
-        if title_tag and title_tag.get_text(strip=True):
-            title = title_tag.get_text(strip=True)
-        elif img_tag and img_tag.get('alt') and img_tag.get('alt').strip() != "Featured Image":
-            title = img_tag.get('alt').strip()
-        else:
-            title = clean_title_from_url(detail_url)
-
-        # প্রথম ধাপে ১৮+ কন্টেন্ট ফিল্টার করে বাদ দেওয়া
-        if is_18_plus(title, detail_url):
-            continue
-
-        seen_urls.add(detail_url)
-        items.append({
-            "original_index": global_index_counter[0],
-            "title": title,
-            "logo_url": img_url if img_url else "",
-            "detail_url": detail_url
-        })
-        global_index_counter[0] += 1
-        
-    return items
-
 def scrape_mlsbd():
-    print(f"Super-fast scraping started for pages {START_PAGE} to {END_PAGE} at: {datetime.now()}")
+    print(f"Scraping started at: {datetime.now()}")
     
-    scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'linux', 'desktop': True})
+    base_scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'linux', 'desktop': True})
     
     try:
-        seen_urls = set()
+        response = base_scraper.get(BASE_URL, timeout=30)
+        if response.status_code != 200:
+            raise Exception(f"Failed to fetch homepage, status code: {response.status_code}")
+            
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
         all_items_meta = []
-        global_index_counter = [0]
-
-        for page_num in range(START_PAGE, END_PAGE + 1):
-            if page_num == 1:
-                page_url = BASE_URL
-            else:
-                page_url = f"{BASE_URL}page/{page_num}/"
-
-            try:
-                response = scraper.get(page_url, timeout=8)
-                if response.status_code != 200:
-                    break
-                
-                soup = BeautifulSoup(response.text, 'html.parser')
-                new_items = extract_items_from_soup(soup, seen_urls, global_index_counter)
-                
-                if not new_items:
-                    break
-                else:
-                    all_items_meta.extend(new_items)
-            except Exception as e:
+        seen_urls = set()
+        
+        cards = soup.find_all(['article', 'div'], class_=lambda x: x and any(c in x.lower() for c in ['item', 'post', 'card', 'box']))
+        
+        for card in cards:
+            link_tag = card.find('a', href=True)
+            if not link_tag:
                 continue
+                
+            detail_url = link_tag['href']
+            if not detail_url.startswith('http'):
+                continue
+                
+            if detail_url.rstrip('/') == BASE_URL.rstrip('/') or detail_url in seen_urls:
+                continue
+                
+            seen_urls.add(detail_url)
+            
+            img_tag = card.find('img')
+            img_url = ""
+            if img_tag:
+                img_url = img_tag.get('data-src') or img_tag.get('src') or img_tag.get('data-lazy-src') or img_tag.get('srcset')
+            
+            title_tag = card.find(['h2', 'h3', 'h1', 'span'], class_=lambda x: x and 'title' in x.lower())
+            if not title_tag:
+                title_tag = card.find(['h2', 'h3', 'h1'])
+
+            if title_tag and title_tag.get_text(strip=True):
+                title = title_tag.get_text(strip=True)
+            elif img_tag and img_tag.get('alt') and img_tag.get('alt').strip() != "Featured Image":
+                title = img_tag.get('alt').strip()
+            else:
+                title = clean_title_from_url(detail_url)
+
+            all_items_meta.append({
+                "title": title,
+                "logo_url": img_url if img_url else "",
+                "detail_url": detail_url
+            })
 
         total_items = len(all_items_meta)
-        print(f"\nTotal items to process: {total_items}. Running high-speed parallel execution (Workers: {MAX_WORKERS})...")
+        print(f"Total valid items found: {total_items}. Processing in batches of {BATCH_SIZE} with Multi-threading...")
 
-        processed_results = []
+        movies_data = []
         
+        # ব্যাচ বাই ব্যাচ মাল্টিথ্রেডিং প্রসেসিং
         for i in range(0, total_items, BATCH_SIZE):
             batch = all_items_meta[i:i + BATCH_SIZE]
+            batch_num = (i // BATCH_SIZE) + 1
+            print(f"\n--- Processing Batch {batch_num} (Items {i+1} to {min(i + BATCH_SIZE, total_items)}) concurrently ---")
             
             with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
                 futures = {executor.submit(process_single_item, item): item for item in batch}
                 
                 for future in as_completed(futures):
-                    res = future.result()
-                    if res:
-                        processed_results.append(res)
+                    result = future.result()
+                    if result:
+                        movies_data.append(result)
+            
+            # প্রতি ব্যাচ শেষে সেভ করা
+            with open('multilink.json', 'w', encoding='utf-8') as f:
+                json.dump(movies_data, f, ensure_ascii=False, indent=4)
+            print(f"Batch {batch_num} saved successfully.")
 
-        processed_results.sort(key=lambda x: x[0])
-        movies_data = [item[1] for item in processed_results]
+        print(f"\nSuccessfully completed! All {len(movies_data)} items saved to multilink.json")
 
-        output_filename = f"multilink_{START_PAGE}_{END_PAGE}.json"
-        with open(output_filename, 'w', encoding='utf-8') as f:
-            json.dump(movies_data, f, ensure_ascii=False, indent=4)
-
-        print(f"\nSuccessfully completed! Saved {len(movies_data)} items to {output_filename} at {datetime.now()}")
-
-        status_message = f"SUCCESS: Scraped {len(movies_data)} items (Pages {START_PAGE}-{END_PAGE}) at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        status_message = f"SUCCESS: Multi-threaded Phase completed. Scraped {len(movies_data)} items at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         with open('status.txt', 'w', encoding='utf-8') as f:
             f.write(status_message)
 
