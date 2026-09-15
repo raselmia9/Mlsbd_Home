@@ -1,1 +1,1 @@
-🟢 SUCCESS: Scraped total 1 unique items successfully from pages 1 to 10 at 2026-09-15 11:10:20
+🟡 WARNING: Scraped 0 items. Please check connection or site layout at 2026-09-15 16:21:06
